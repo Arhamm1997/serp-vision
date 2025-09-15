@@ -60,7 +60,7 @@ export async function getSerpAnalysis(input: GetSerpAnalysisInput): Promise<Serp
   // Simulate API delay
   await new Promise(resolve => setTimeout(resolve, 2000));
 
-  const keywords = input.keywords.split(/\r?\n/).map(k => k.trim()).filter(Boolean);
+  const keywords = [...new Set(input.keywords.split(/\r?\n/).map(k => k.trim()).filter(Boolean))];
 
   const mockSerpData: SerpData[] = keywords.map((keyword, index) => {
     const trends: ('up' | 'down' | 'stable')[] = ['up', 'down', 'stable'];

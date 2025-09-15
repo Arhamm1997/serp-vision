@@ -1,32 +1,62 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import type { SerpAnalysisResult } from '@/lib/types';
 import { getSerpAnalysis } from '@/app/actions';
 import { KeywordForm, type KeywordFormValues } from '@/components/keyword-form';
 import { ResultsDisplay } from '@/components/results-display';
 import { LoadingSkeleton } from '@/components/loading-skeleton';
 import Logo from '@/components/logo';
+import { Progress } from '@/components/ui/progress';
 
 export default function Home() {
   const [analysis, setAnalysis] = useState<SerpAnalysisResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
+  const [totalKeywords, setTotalKeywords] = useState(0);
 
   const handleAnalysis = async (data: KeywordFormValues) => {
     setIsLoading(true);
     setAnalysis(null);
     setError(null);
+    setProgress(0);
+
+    const keywords = [...new Set(data.keywords.split(/\r?\n/).map(k => k.trim()).filter(Boolean))];
+    setTotalKeywords(keywords.length);
+
+    // Simulate progress
+    const interval = setInterval(() => {
+      setProgress(prev => {
+        if (prev >= 95) {
+          clearInterval(interval);
+          return 95;
+        }
+        return prev + 5;
+      });
+    }, 200);
+
     try {
-      const result = await getSerpAnalysis(data);
+      const result = await getSerpAnalysis({...data, keywords: keywords.join('\n')});
+      setProgress(100);
       setAnalysis(result);
     } catch (e) {
       setError('An unexpected error occurred. Please try again.');
       console.error(e);
     } finally {
+      clearInterval(interval);
       setIsLoading(false);
     }
   };
+
+  const progressText = useMemo(() => {
+    if (progress < 100) {
+      const keywordsDone = Math.floor((progress / 100) * totalKeywords);
+      return `Analyzing ${keywordsDone} of ${totalKeywords} keywords...`;
+    }
+    return `Analyzed all ${totalKeywords} keywords!`;
+  }, [progress, totalKeywords]);
+
 
   return (
     <div className="flex flex-col items-center min-h-screen p-4 sm:p-6 lg:p-8">
@@ -48,8 +78,14 @@ export default function Home() {
         {error && <div className="text-center text-destructive mt-8">{error}</div>}
 
         <div className="mt-12">
-          {isLoading && <LoadingSkeleton />}
+          {isLoading && (
+             <div className="w-full max-w-md mx-auto space-y-4">
+              <p className="text-center text-foreground/80">{progressText}</p>
+              <Progress value={progress} className="w-full" />
+            </div>
+          )}
           {analysis && <ResultsDisplay analysis={analysis} />}
+           {isLoading && !analysis && <div className="mt-8"><LoadingSkeleton /></div>}
         </div>
       </main>
     </div>
