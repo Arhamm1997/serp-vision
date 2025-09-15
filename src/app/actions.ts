@@ -6,7 +6,10 @@ import type { SerpAnalysisResult, SerpData } from '@/lib/types';
 interface GetSerpAnalysisInput {
   keywords: string;
   url: string;
-  location: string;
+  location?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
 }
 
 function generateHistoricalData(
@@ -57,7 +60,7 @@ export async function getSerpAnalysis(input: GetSerpAnalysisInput): Promise<Serp
   // Simulate API delay
   await new Promise(resolve => setTimeout(resolve, 2000));
 
-  const keywords = input.keywords.split(',').map(k => k.trim()).filter(Boolean);
+  const keywords = input.keywords.split(/\r?\n/).map(k => k.trim()).filter(Boolean);
 
   const mockSerpData: SerpData[] = keywords.map((keyword, index) => {
     const trends: ('up' | 'down' | 'stable')[] = ['up', 'down', 'stable'];

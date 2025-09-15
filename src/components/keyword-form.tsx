@@ -8,11 +8,15 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormDescription } from '@/components/ui/form';
 import { Search, Link, MapPin, Loader2 } from 'lucide-react';
+import { Textarea } from '@/components/ui/textarea';
 
 const formSchema = z.object({
   keywords: z.string().min(3, { message: 'Please enter at least one keyword.' }),
   url: z.string().url({ message: 'Please enter a valid URL.' }),
-  location: z.string().min(2, { message: 'Please enter a location.' }),
+  location: z.string().optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  postalCode: z.string().optional(),
 });
 
 export type KeywordFormValues = z.infer<typeof formSchema>;
@@ -29,6 +33,9 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
       keywords: '',
       url: '',
       location: 'United States',
+      city: '',
+      state: '',
+      postalCode: '',
     },
   });
 
@@ -48,14 +55,15 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Keywords</FormLabel>
-                    <div className="relative">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                      <FormControl>
-                        <Input placeholder="e.g., next.js features, tailwind guide" {...field} className="pl-10" />
-                      </FormControl>
-                    </div>
+                    <FormControl>
+                      <Textarea
+                        placeholder="e.g., next.js features, tailwind guide"
+                        className="h-32"
+                        {...field}
+                      />
+                    </FormControl>
                     <FormDescription>
-                      Comma-separated keywords you want to track.
+                      Enter keywords in bulk, one per line.
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -81,12 +89,53 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                 )}
               />
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <FormField
+                control={form.control}
+                name="city"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>City</FormLabel>
+                    <FormControl>
+                      <Input placeholder="e.g., San Francisco" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="state"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>State</FormLabel>
+                    <FormControl>
+                      <Input placeholder="e.g., CA" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="postalCode"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Postal Code</FormLabel>
+                    <FormControl>
+                      <Input placeholder="e.g., 94107" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
              <FormField
                 control={form.control}
                 name="location"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Location</FormLabel>
+                    <FormLabel>Country</FormLabel>
                     <div className="relative">
                       <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                       <FormControl>
