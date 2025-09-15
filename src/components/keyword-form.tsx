@@ -9,6 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormDescription } from '@/components/ui/form';
 import { Search, Link, MapPin, Loader2 } from 'lucide-react';
 import { Textarea } from '@/components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { countries } from '@/lib/countries';
 
 const formSchema = z.object({
   keywords: z.string().min(1, { message: 'Please enter at least one keyword.' }),
@@ -89,6 +91,34 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                 )}
               />
             </div>
+             <FormField
+                control={form.control}
+                name="location"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Country</FormLabel>
+                     <Select onValueChange={field.onChange} defaultValue={field.value}>
+                        <FormControl>
+                          <SelectTrigger>
+                            <div className="flex items-center gap-2">
+                               <MapPin className="h-4 w-4 text-muted-foreground" />
+                               <SelectValue placeholder="Select a country" />
+                            </div>
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {countries.map(country => (
+                             <SelectItem key={country.value} value={country.value}>{country.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    <FormDescription>
+                      The geographic location for the search.
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <FormField
                 control={form.control}
@@ -130,25 +160,6 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                 )}
               />
             </div>
-             <FormField
-                control={form.control}
-                name="location"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Country</FormLabel>
-                    <div className="relative">
-                      <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                      <FormControl>
-                        <Input placeholder="e.g., United States" {...field} className="pl-10"/>
-                      </FormControl>
-                    </div>
-                    <FormDescription>
-                      The geographic location for the search.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
             <Button type="submit" disabled={isLoading} className="w-full md:w-auto">
               {isLoading ? (
                 <>
