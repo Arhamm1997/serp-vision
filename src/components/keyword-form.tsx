@@ -139,7 +139,7 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                     <div className="relative">
                       <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                       <FormControl>
-                        <Input placeholder="e.g., United States" {...field} />
+                        <Input placeholder="e.g., United States" {...field} className="pl-10"/>
                       </FormControl>
                     </div>
                     <FormDescription>
