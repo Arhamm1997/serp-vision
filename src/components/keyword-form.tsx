@@ -11,7 +11,7 @@ import { Search, Link, MapPin, Loader2 } from 'lucide-react';
 import { Textarea } from '@/components/ui/textarea';
 
 const formSchema = z.object({
-  keywords: z.string().min(3, { message: 'Please enter at least one keyword.' }),
+  keywords: z.string().min(1, { message: 'Please enter at least one keyword.' }),
   url: z.string().url({ message: 'Please enter a valid URL.' }),
   location: z.string().optional(),
   city: z.string().optional(),
@@ -54,16 +54,16 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                 name="keywords"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Keywords</FormLabel>
+                    <FormLabel>Keyword(s)</FormLabel>
                     <FormControl>
                       <Textarea
-                        placeholder="e.g., next.js features, tailwind guide"
+                        placeholder="e.g., next.js features&#10;tailwind guide"
                         className="h-32"
                         {...field}
                       />
                     </FormControl>
                     <FormDescription>
-                      Enter keywords in bulk, one per line.
+                      Enter a single keyword or multiple, one per line.
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -95,7 +95,7 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                 name="city"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>City</FormLabel>
+                    <FormLabel>City (Optional)</FormLabel>
                     <FormControl>
                       <Input placeholder="e.g., San Francisco" {...field} />
                     </FormControl>
@@ -108,7 +108,7 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                 name="state"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>State</FormLabel>
+                    <FormLabel>State (Optional)</FormLabel>
                     <FormControl>
                       <Input placeholder="e.g., CA" {...field} />
                     </FormControl>
@@ -121,7 +121,7 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                 name="postalCode"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Postal Code</FormLabel>
+                    <FormLabel>Postal Code (Optional)</FormLabel>
                     <FormControl>
                       <Input placeholder="e.g., 94107" {...field} />
                     </FormControl>
@@ -139,7 +139,7 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                     <div className="relative">
                       <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                       <FormControl>
-                        <Input placeholder="e.g., California, United States" {...field} className="pl-10" />
+                        <Input placeholder="e.g., United States" {...field} />
                       </FormControl>
                     </div>
                     <FormDescription>
