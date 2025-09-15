@@ -16,7 +16,7 @@ import { useToast } from '@/hooks/use-toast';
 
 const formSchema = z.object({
   keywords: z.string().min(1, { message: 'Please enter at least one keyword.' }),
-  url: z.string().url({ message: 'Please enter a valid URL.' }).refine(val => val.length > 0, { message: 'Please enter a valid URL.' }),
+  url: z.string().min(1, { message: 'Please enter a valid URL.' }),
   location: z.string().optional(),
   city: z.string().optional(),
   state: z.string().optional(),
@@ -140,7 +140,7 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                     <div className="relative">
                       <Link className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                       <FormControl>
-                        <Input placeholder="https://example.com" {...field} className="pl-10" />
+                        <Input placeholder="example.com" {...field} className="pl-10" />
                       </FormControl>
                     </div>
                      <FormDescription>
