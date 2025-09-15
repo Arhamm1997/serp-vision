@@ -1,5 +1,6 @@
 'use client';
 
+import { useRef } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -7,14 +8,15 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage, FormDescription } from '@/components/ui/form';
-import { Search, Link, MapPin, Loader2 } from 'lucide-react';
+import { Search, Link, MapPin, Loader2, Upload } from 'lucide-react';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { countries } from '@/lib/countries';
+import { useToast } from '@/hooks/use-toast';
 
 const formSchema = z.object({
   keywords: z.string().min(1, { message: 'Please enter at least one keyword.' }),
-  url: z.string().url({ message: 'Please enter a valid URL.' }),
+  url: z.string().url({ message: 'Please enter a valid URL.' }).refine(val => val.length > 0, { message: 'Please enter a valid URL.' }),
   location: z.string().optional(),
   city: z.string().optional(),
   state: z.string().optional(),
@@ -40,6 +42,51 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
       postalCode: '',
     },
   });
+  
+  const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFormSubmit = (values: KeywordFormValues) => {
+    let { url } = values;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = `https://${url}`;
+    }
+    onSubmit({ ...values, url });
+  };
+  
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (file.type !== 'text/csv') {
+      toast({
+        variant: 'destructive',
+        title: 'Invalid File Type',
+        description: 'Please upload a valid CSV file.',
+      });
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      // Assuming CSV has one column of keywords, or keywords are in the first column.
+      const keywords = text.split('\n').map(row => row.split(',')[0].trim()).filter(Boolean);
+      const currentKeywords = form.getValues('keywords');
+      const newKeywords = [...(currentKeywords ? currentKeywords.split('\n') : []), ...keywords]
+        .filter(Boolean)
+        .join('\n');
+      form.setValue('keywords', newKeywords, { shouldValidate: true });
+       toast({
+        title: 'Import Successful',
+        description: `${keywords.length} keywords were imported.`,
+      });
+    };
+    reader.readAsText(file);
+    // Reset file input
+    event.target.value = '';
+  };
+
 
   return (
     <Card className="glass-card w-full">
@@ -49,14 +96,27 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
       </CardHeader>
       <CardContent>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+          <form onSubmit={form.handleSubmit(handleFormSubmit)} className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <FormField
                 control={form.control}
                 name="keywords"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Keyword(s)</FormLabel>
+                     <div className="flex justify-between items-center">
+                      <FormLabel>Keyword(s)</FormLabel>
+                      <Button type="button" variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>
+                        <Upload />
+                        Import CSV
+                      </Button>
+                      <input
+                        type="file"
+                        ref={fileInputRef}
+                        onChange={handleFileChange}
+                        className="hidden"
+                        accept=".csv"
+                      />
+                    </div>
                     <FormControl>
                       <Textarea
                         placeholder="e.g., next.js features&#10;tailwind guide"
@@ -65,7 +125,7 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                       />
                     </FormControl>
                     <FormDescription>
-                      Enter a single keyword or multiple, one per line.
+                      Enter keywords one per line, or import a CSV file.
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
