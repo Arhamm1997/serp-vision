@@ -1,20 +1,45 @@
+<<<<<<< HEAD
 / .gitignore (Create this file in root directory)
+=======
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+>>>>>>> e0b4c97e39d2791acb29343867b9687f1945b22d
 # Dependencies
 /node_modules
 /.pnp
 .pnp.js
 
+<<<<<<< HEAD
 # Production
 /build
 /dist
 
 # Environment variables
 .env
+=======
+# Testing
+/coverage
+
+# Next.js build output
+/.next/
+/out/
+
+# Production
+/build
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local development
+>>>>>>> e0b4c97e39d2791acb29343867b9687f1945b22d
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
 
+<<<<<<< HEAD
 # Logs
 logs
 *.log
@@ -37,10 +62,15 @@ coverage
 # Dependency directories
 node_modules/
 jspm_packages/
+=======
+# Turbo
+.turbo
+>>>>>>> e0b4c97e39d2791acb29343867b9687f1945b22d
 
 # TypeScript
 *.tsbuildinfo
 
+<<<<<<< HEAD
 # Optional npm cache directory
 .npm
 
@@ -86,3 +116,9 @@ jspm_packages/
 .Trashes
 ehthumbs.db
 Thumbs.db
+=======
+# Misc
+.DS_Store
+*~
+.swc
+>>>>>>> e0b4c97e39d2791acb29343867b9687f1945b22d
