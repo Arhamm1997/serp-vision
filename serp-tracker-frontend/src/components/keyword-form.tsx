@@ -21,6 +21,7 @@ const formSchema = z.object({
   city: z.string().optional(),
   state: z.string().optional(),
   postalCode: z.string().optional(),
+  businessName: z.string().min(1, { message: 'Please enter a business name.' }),
 });
 
 export type KeywordFormValues = z.infer<typeof formSchema>;
@@ -36,10 +37,11 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
     defaultValues: {
       keywords: '',
       url: '',
-      location: 'United States',
+      location: 'US',
       city: '',
       state: '',
       postalCode: '',
+      businessName: '',
     },
   });
   
@@ -47,11 +49,11 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFormSubmit = (values: KeywordFormValues) => {
-    let { url } = values;
+    let { url, businessName } = values;
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       url = `https://${url}`;
     }
-    onSubmit({ ...values, url });
+    onSubmit({ ...values, url, businessName });
   };
   
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -126,6 +128,22 @@ export function KeywordForm({ onSubmit, isLoading }: KeywordFormProps) {
                     </FormControl>
                     <FormDescription>
                       Enter keywords one per line, or import a CSV file.
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="businessName"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Business Name</FormLabel>
+                    <FormControl>
+                      <Input placeholder="e.g., My Business" {...field} />
+                    </FormControl>
+                    <FormDescription>
+                      The business name associated with these keywords.
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

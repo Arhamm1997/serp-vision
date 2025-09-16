@@ -11,6 +11,7 @@ interface GetSerpAnalysisInput {
   state?: string;
   postalCode?: string;
   apiKey?: string;
+  businessName?: string;
 }
 
 function generateHistoricalData(
@@ -75,7 +76,8 @@ export async function getSerpAnalysis(input: GetSerpAnalysisInput): Promise<Serp
         country: input.location,
         city: input.city,
         state: input.state,
-        postalCode: input.postalCode
+        postalCode: input.postalCode,
+        businessName: input.businessName
       };
       const headers: Record<string, string> = {
         'Content-Type': 'application/json'
@@ -109,7 +111,8 @@ export async function getSerpAnalysis(input: GetSerpAnalysisInput): Promise<Serp
         country: input.location,
         city: input.city,
         state: input.state,
-        postalCode: input.postalCode
+        postalCode: input.postalCode,
+        businessName: input.businessName
       };
       const headers: Record<string, string> = {
         'Content-Type': 'application/json'

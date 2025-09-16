@@ -17,6 +17,7 @@ export interface ISearchResultDocument extends Document {
   found: boolean;
   processingTime?: number;
   apiKeyUsed?: string;
+  businessName?: string;
 }
 
 const searchResultSchema = new Schema<ISearchResultDocument>({
@@ -35,7 +36,8 @@ const searchResultSchema = new Schema<ISearchResultDocument>({
   timestamp: { type: Date, default: Date.now },
   found: { type: Boolean, default: false },
   processingTime: { type: Number, default: null },
-  apiKeyUsed: { type: String, default: null }
+  apiKeyUsed: { type: String, default: null },
+  businessName: { type: String, default: '', trim: true }
 });
 
 // Indexes for efficient querying

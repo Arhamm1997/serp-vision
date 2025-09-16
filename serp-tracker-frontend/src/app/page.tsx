@@ -66,7 +66,7 @@ export default function Home() {
       for (let i = 0; i < apiKeys.length; i++) {
         const apiKey = apiKeys[(activeKeyIdx + i) % apiKeys.length];
         try {
-          result = await getSerpAnalysis({ ...data, keywords: keywords.join('\n'), apiKey });
+          result = await getSerpAnalysis({ ...data, keywords, apiKey });
           setActiveKeyIdx((activeKeyIdx + i) % apiKeys.length);
           break;
         } catch (err) {
