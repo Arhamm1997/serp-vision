@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import type { SerpAnalysisResult } from '@/lib/types';
-import { getSerpAnalysis } from '@/app/actions';
+import { getSerpAnalysis, checkBackendHealth } from '@/app/actions';
 import { KeywordForm, type KeywordFormValues } from '@/components/keyword-form';
 import { ResultsDisplay } from '@/components/results-display';
 import { LoadingSkeleton } from '@/components/loading-skeleton';
@@ -10,6 +10,8 @@ import Logo from '@/components/logo';
 import { Progress } from '@/components/ui/progress';
 import { ApiKeyManager } from '@/components/api-key-manager';
 import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AlertCircle, CheckCircle } from 'lucide-react';
 
 export default function Home() {
   const [showPassword, setShowPassword] = useState(false);
@@ -18,6 +20,7 @@ export default function Home() {
   const [passwordInput, setPasswordInput] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const API_KEY_MANAGER_PASSWORD = '27774426'; // Change as needed
+  
   const [apiKeys, setApiKeys] = useState<string[]>(() => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem('apiKeys');
@@ -25,18 +28,39 @@ export default function Home() {
     }
     return [];
   });
+  
   const [activeKeyIdx, setActiveKeyIdx] = useState(0);
   const [analysis, setAnalysis] = useState<SerpAnalysisResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
   const [totalKeywords, setTotalKeywords] = useState(0);
-  const [backendConnected, setBackendConnected] = useState<boolean | null>(null);
-  // Check backend connection on mount
+  const [backendStatus, setBackendStatus] = useState<{
+    connected: boolean | null;
+    message: string;
+  }>({
+    connected: null,
+    message: 'Checking backend connection...'
+  });
+
+  // Check backend connection on mount and periodically
   useEffect(() => {
-    fetch('http://localhost:5000/api/health')
-      .then(res => setBackendConnected(res.ok))
-      .catch(() => setBackendConnected(false));
+    const checkHealth = async () => {
+      const health = await checkBackendHealth();
+      setBackendStatus({
+        connected: health.connected,
+        message: health.message
+      });
+    };
+
+    // Initial check
+    checkHealth();
+
+    // Check every 30 seconds
+    const interval = setInterval(checkHealth, 30000);
+    
+    return () => clearInterval(interval);
   }, []);
 
   const handleAnalysis = async (data: KeywordFormValues) => {
@@ -48,64 +72,134 @@ export default function Home() {
     const keywords = [...new Set(data.keywords.split(/\r?\n/).map(k => k.trim()).filter(Boolean))];
     setTotalKeywords(keywords.length);
 
-    // Simulate progress
-    const interval = setInterval(() => {
+    // Progress simulation with realistic messages
+    const progressSteps = [
+      'Initializing analysis...',
+      'Connecting to search engines...',
+      'Processing keywords...',
+      'Fetching search results...',
+      'Analyzing rankings...',
+      'Generating insights...',
+      'Finalizing results...'
+    ];
+
+    let currentStep = 0;
+    setProgressMessage(progressSteps[0]);
+
+    // Simulate progress with meaningful updates
+    const progressInterval = setInterval(() => {
       setProgress(prev => {
-        if (prev >= 95) {
-          clearInterval(interval);
-          return 95;
+        const newProgress = Math.min(prev + Math.random() * 15 + 5, 95);
+        
+        // Update progress message based on progress
+        const stepIndex = Math.floor((newProgress / 100) * progressSteps.length);
+        if (stepIndex !== currentStep && stepIndex < progressSteps.length) {
+          currentStep = stepIndex;
+          setProgressMessage(progressSteps[stepIndex]);
         }
-        return prev + 5;
+        
+        return newProgress;
       });
-    }, 200);
+    }, 800);
 
     try {
-      let result = null;
-      let triedKeys = 0;
-      let lastError = null;
-      for (let i = 0; i < apiKeys.length; i++) {
-        const apiKey = apiKeys[(activeKeyIdx + i) % apiKeys.length];
-        try {
-          result = await getSerpAnalysis({ ...data, keywords, apiKey });
-          setActiveKeyIdx((activeKeyIdx + i) % apiKeys.length);
-          break;
-        } catch (err) {
-          lastError = err;
-          triedKeys++;
-        }
+      // Select API key if available
+      const selectedApiKey = apiKeys.length > 0 ? apiKeys[activeKeyIdx] : undefined;
+      
+      if (apiKeys.length === 0) {
+        console.warn('No API keys configured - using backend default keys');
       }
-      if (!result) throw lastError || new Error('No API keys available');
+
+      const result = await getSerpAnalysis({ 
+        ...data, 
+        keywords: keywords.join('\n'),
+        apiKey: selectedApiKey 
+      });
+      
+      clearInterval(progressInterval);
       setProgress(100);
-      setAnalysis(result);
-    } catch (e) {
-      setError('An unexpected error occurred. Please try again.');
-      console.error(e);
+      setProgressMessage('Analysis complete!');
+      
+      // Small delay to show completion
+      setTimeout(() => {
+        setAnalysis(result);
+        
+        // Check if result contains warning about backend failure
+        if (result.aiInsights.includes('Backend connection failed')) {
+          setError('Backend connection failed. Showing demo data. Please check if the SERP tracker backend is running.');
+        }
+      }, 500);
+
+    } catch (err: any) {
+      clearInterval(progressInterval);
+      console.error('Analysis failed:', err);
+      
+      setError(
+        err.message || 
+        'Analysis failed. Please check your connection and try again. If the problem persists, verify that the backend server is running.'
+      );
     } finally {
-      clearInterval(interval);
       setIsLoading(false);
     }
   };
 
   const progressText = useMemo(() => {
     if (progress < 100) {
-      const keywordsDone = Math.floor((progress / 100) * totalKeywords);
-      return `Analyzing ${keywordsDone} of ${totalKeywords} keywords...`;
+      return progressMessage || `Processing ${totalKeywords} keywords...`;
     }
-    return `Analyzed all ${totalKeywords} keywords!`;
-  }, [progress, totalKeywords]);
+    return `Successfully analyzed ${totalKeywords} keywords!`;
+  }, [progress, progressMessage, totalKeywords]);
 
+  const getBackendStatusDisplay = () => {
+    if (backendStatus.connected === null) {
+      return (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <div className="w-2 h-2 bg-muted-foreground rounded-full animate-pulse"></div>
+          <span className="text-sm">Checking backend...</span>
+        </div>
+      );
+    } else if (backendStatus.connected) {
+      return (
+        <div className="flex items-center gap-2 text-green-600">
+          <CheckCircle className="w-4 h-4" />
+          <span className="text-sm font-medium">Backend Connected</span>
+        </div>
+      );
+    } else {
+      return (
+        <div className="flex items-center gap-2 text-red-600">
+          <AlertCircle className="w-4 h-4" />
+          <span className="text-sm font-medium">Backend Disconnected</span>
+        </div>
+      );
+    }
+  };
 
   return (
     <div className="flex flex-col items-center min-h-screen p-4 sm:p-6 lg:p-8">
-      <div className="w-full max-w-6xl mb-2 flex justify-end">
-        {backendConnected === null ? (
-          <span className="text-muted-foreground">Checking backend...</span>
-        ) : backendConnected ? (
-          <span className="text-green-600 font-semibold">Backend Connected</span>
-        ) : (
-          <span className="text-red-600 font-semibold">Backend Disconnected</span>
-        )}
+      {/* Backend Status */}
+      <div className="w-full max-w-6xl mb-4 flex justify-end">
+        {getBackendStatusDisplay()}
       </div>
+
+      {/* Backend Status Alert */}
+      {backendStatus.connected === false && (
+        <div className="w-full max-w-6xl mb-6">
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              <strong>Backend Connection Failed:</strong> {backendStatus.message}
+              <br />
+              <span className="text-sm">
+                Make sure the SERP tracker backend is running on port 5000 and API keys are configured.
+                The app will show demo data until the backend is available.
+              </span>
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
+      {/* Header */}
       <header className="w-full max-w-6xl mb-8 text-center">
         <div className="flex justify-center items-center gap-4 mb-4">
           <Logo className="w-12 h-12 text-primary" />
@@ -119,20 +213,44 @@ export default function Home() {
       </header>
 
       <main className="w-full max-w-6xl">
-        <div className="mb-4">
+        {/* API Key Management */}
+        <div className="mb-6">
           {!showApiKeyManager ? (
-            <Button
-              className="border border-primary bg-background text-primary font-semibold py-2 px-6 rounded-lg shadow-sm hover:bg-primary hover:text-background transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary"
-              onClick={() => setShowApiKeyManager(true)}
-              data-variant="outline"
-            >
-              Manage API Keys
-            </Button>
+            <div className="flex items-center justify-between">
+              <Button
+                variant="outline"
+                onClick={() => setShowApiKeyManager(true)}
+              >
+                Manage API Keys ({apiKeys.length} configured)
+              </Button>
+              {apiKeys.length > 0 && (
+                <span className="text-sm text-muted-foreground">
+                  Using key: {apiKeys[activeKeyIdx]?.slice(0, 8)}...{apiKeys[activeKeyIdx]?.slice(-4)}
+                </span>
+              )}
+            </div>
           ) : (
             apiKeyPassword === API_KEY_MANAGER_PASSWORD ? (
               <div className="relative">
-                <ApiKeyManager onApiKeysChange={setApiKeys} />
-                <Button className="absolute top-2 right-2 bg-secondary text-secondary-foreground" onClick={() => { setShowApiKeyManager(false); setApiKeyPassword(''); setPasswordInput(''); setPasswordError(''); }}>Hide</Button>
+                <ApiKeyManager 
+                  onApiKeysChange={(keys) => {
+                    setApiKeys(keys);
+                    if (activeKeyIdx >= keys.length) {
+                      setActiveKeyIdx(0);
+                    }
+                  }} 
+                />
+                <Button 
+                  className="absolute top-2 right-2 bg-secondary text-secondary-foreground" 
+                  onClick={() => { 
+                    setShowApiKeyManager(false); 
+                    setApiKeyPassword(''); 
+                    setPasswordInput(''); 
+                    setPasswordError(''); 
+                  }}
+                >
+                  Hide
+                </Button>
               </div>
             ) : (
               <div className="max-w-sm mx-auto p-6 border rounded-lg bg-background shadow-lg flex flex-col gap-4">
@@ -144,6 +262,15 @@ export default function Home() {
                     value={passwordInput}
                     onChange={e => setPasswordInput(e.target.value)}
                     placeholder="Password"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        if (passwordInput === API_KEY_MANAGER_PASSWORD) {
+                          setApiKeyPassword(passwordInput);
+                        } else {
+                          setPasswordError('Incorrect password');
+                        }
+                      }
+                    }}
                   />
                   <button
                     type="button"
@@ -162,34 +289,71 @@ export default function Home() {
                   </button>
                 </div>
                 <div className="flex gap-2 mt-2">
-                  <Button className="bg-primary text-primary-foreground flex-1" onClick={() => {
-                    if (passwordInput === API_KEY_MANAGER_PASSWORD) {
-                      setApiKeyPassword(passwordInput);
-                    } else {
-                      setPasswordError('Incorrect password');
-                    }
-                  }}>Unlock</Button>
-                  <Button className="bg-secondary text-secondary-foreground flex-1" onClick={() => { setShowApiKeyManager(false); setPasswordInput(''); setPasswordError(''); }}>Hide</Button>
-                  <Button className="flex-1" onClick={() => { setShowApiKeyManager(false); setPasswordInput(''); setPasswordError(''); }}>Cancel</Button>
+                  <Button 
+                    className="bg-primary text-primary-foreground flex-1" 
+                    onClick={() => {
+                      if (passwordInput === API_KEY_MANAGER_PASSWORD) {
+                        setApiKeyPassword(passwordInput);
+                        setPasswordError('');
+                      } else {
+                        setPasswordError('Incorrect password');
+                      }
+                    }}
+                  >
+                    Unlock
+                  </Button>
+                  <Button 
+                    variant="secondary" 
+                    className="flex-1" 
+                    onClick={() => { 
+                      setShowApiKeyManager(false); 
+                      setPasswordInput(''); 
+                      setPasswordError(''); 
+                    }}
+                  >
+                    Cancel
+                  </Button>
                 </div>
                 {passwordError && <div className="text-destructive mt-2 text-center">{passwordError}</div>}
               </div>
             )
           )}
         </div>
+
+        {/* Keyword Form */}
         <KeywordForm onSubmit={handleAnalysis} isLoading={isLoading} />
         
-        {error && <div className="text-center text-destructive mt-8">{error}</div>}
+        {/* Error Display */}
+        {error && (
+          <Alert variant="destructive" className="mt-6">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
 
+        {/* Progress and Results */}
         <div className="mt-12">
           {isLoading && (
-             <div className="w-full max-w-md mx-auto space-y-4">
+            <div className="w-full max-w-md mx-auto space-y-4 mb-8">
               <p className="text-center text-foreground/80">{progressText}</p>
               <Progress value={progress} className="w-full" />
+              <p className="text-center text-sm text-muted-foreground">
+                {progress < 100 ? `${Math.round(progress)}% complete` : 'Processing complete!'}
+              </p>
             </div>
           )}
-          {analysis && <ResultsDisplay analysis={analysis} />}
-           {isLoading && !analysis && <div className="mt-8"><LoadingSkeleton /></div>}
+          
+          {analysis && (
+            <div className="space-y-4">
+              <ResultsDisplay analysis={analysis} />
+            </div>
+          )}
+           
+          {isLoading && !analysis && (
+            <div className="mt-8">
+              <LoadingSkeleton />
+            </div>
+          )}
         </div>
       </main>
     </div>

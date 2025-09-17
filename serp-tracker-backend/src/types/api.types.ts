@@ -23,6 +23,7 @@ export interface ISearchOptions {
   postalCode?: string;
   device?: 'desktop' | 'mobile' | 'tablet';
   location?: string;
+  apiKey?: string;
 }
 
 export interface ISearchResult {

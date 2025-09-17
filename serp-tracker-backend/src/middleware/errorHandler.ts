@@ -50,6 +50,12 @@ export const errorHandler = (
     } else if (error.message.includes('timeout')) {
       status = 408;
       message = 'Request timeout';
+    } else if (error.message.includes('Invalid JSON')) {
+      status = 400;
+      message = 'Invalid JSON format in request body';
+    } else if (error.message.includes('validation')) {
+      status = 400;
+      message = 'Validation failed';
     }
   }
 
@@ -59,7 +65,13 @@ export const errorHandler = (
     errors: errors.length > 0 ? errors : undefined,
     ...(process.env.NODE_ENV === 'development' && { 
       stack: error.stack,
-      originalError: error.message 
+      originalError: error.message,
+      requestInfo: {
+        method: req.method,
+        url: req.url,
+        body: req.body,
+        headers: req.headers
+      }
     })
   };
 

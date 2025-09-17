@@ -9,7 +9,7 @@ import { logger } from './utils/logger';
 import { errorHandler } from './middleware/errorHandler';
 import { rateLimiter, speedLimiter } from './middleware/rateLimiter';
 import { corsMiddleware } from './middleware/cors';
-import { requestLogger } from './middleware/validation';
+// Remove invalid import, not exported
 import { setupRoutes } from './routes';
 import { SerpApiPoolManager } from './services/serpApiPoolManager';
 import { scheduleCleanupJobs } from './services/scheduler';
@@ -52,18 +52,53 @@ class Server {
     // Compression
     this.app.use(compression());
 
-    // Body parsing
+    // Enhanced body parsing with error handling
     this.app.use(express.json({ 
       limit: '10mb',
-      type: ['application/json', 'text/plain']
+      type: ['application/json', 'text/plain'],
+      verify: (req, res, buf) => {
+        try {
+          JSON.parse(buf.toString());
+        } catch (e) {
+          logger.error('Invalid JSON in request body:', {
+            error: (e instanceof Error ? e.message : String(e)),
+            body: buf.toString(),
+            url: req.url
+          });
+          throw new Error('Invalid JSON format');
+        }
+      }
     }));
+
     this.app.use(express.urlencoded({ 
       extended: true, 
       limit: '10mb' 
     }));
 
+    // JSON parsing error handler
+    this.app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (error instanceof SyntaxError && 'body' in error) {
+        logger.error('JSON parsing error:', { error: error.message, url: req.url });
+        res.status(400).json({
+          success: false,
+          message: 'Invalid JSON format in request body'
+        });
+        return;
+      }
+      next(error);
+    });
+
     // Request logging
-    this.app.use(requestLogger);
+    this.app.use((req, res, next) => {
+      logger.info('Request:', {
+        method: req.method,
+        url: req.url,
+        ip: req.ip,
+        userAgent: req.get('User-Agent'),
+        body: req.body
+      });
+      next();
+    });
 
     // HTTP request logging
     if (process.env.NODE_ENV !== 'test') {
@@ -133,6 +168,29 @@ class Server {
     this.app.use(errorHandler);
   }
 
+  private async tryPort(port: number): Promise<number> {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const testServer = this.app.listen(port, () => {
+          testServer.close(() => resolve());
+        });
+        testServer.on('error', (err: any) => {
+          if (err.code === 'EADDRINUSE') {
+            reject(new Error(`Port ${port} is in use`));
+          } else {
+            reject(err);
+          }
+        });
+      });
+      return port;
+    } catch (error) {
+      if (port < 5010) { // Try up to port 5010
+        return this.tryPort(port + 1);
+      }
+      throw error;
+    }
+  }
+
   public async start(): Promise<void> {
     try {
       // Connect to database
@@ -140,12 +198,22 @@ class Server {
       logger.info('✅ Database connected successfully');
 
       // Initialize SerpApi Pool Manager
-      await SerpApiPoolManager.getInstance().initialize();
+      const serpApiManager = SerpApiPoolManager.getInstance();
+      await serpApiManager.initialize();
+      
+      // Check if we have valid API keys
+      const keyStats = serpApiManager.getKeyStats();
+      if (keyStats.total === 0) {
+        logger.warn('⚠️ No valid SerpAPI keys found. Please configure SERPAPI_KEY in .env or provide via API');
+      } 
       logger.info('✅ SerpApi Pool Manager initialized');
 
       // Schedule cleanup jobs
       scheduleCleanupJobs();
       logger.info('✅ Scheduled jobs initialized');
+
+      // Find available port
+      this.port = await this.tryPort(this.port);
 
       // Start server
       const server = this.app.listen(this.port, () => {

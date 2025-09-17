@@ -12,6 +12,10 @@ interface ResultsDisplayProps {
 }
 
 export function ResultsDisplay({ analysis }: ResultsDisplayProps) {
+  if (!analysis || !analysis.serpData || !analysis.aiInsights) {
+    return null;
+  }
+
   return (
     <div className="space-y-8 animate-in fade-in-0 slide-in-from-bottom-8 duration-500">
       <Card className="glass-card">
@@ -20,15 +24,21 @@ export function ResultsDisplay({ analysis }: ResultsDisplayProps) {
               <Sparkles className="h-5 w-5 text-primary" />
               AI-Powered Insights
             </CardTitle>
-            <DownloadButton data={analysis.serpData} />
+            {analysis.serpData.length > 0 && <DownloadButton data={analysis.serpData} />}
         </CardHeader>
         <AiInsights insights={analysis.aiInsights} />
       </Card>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {analysis.serpData.map((data, index) => (
-          <ResultCard key={data.keyword} data={data} />
-        ))}
-      </div>
+      {analysis.serpData.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {analysis.serpData.map((data, index) => (
+            <ResultCard key={data.keyword || index} data={data} />
+          ))}
+        </div>
+      ) : (
+        <div className="text-center text-muted-foreground">
+          No search results available
+        </div>
+      )}
     </div>
   );
 }

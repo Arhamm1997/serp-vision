@@ -10,6 +10,7 @@ interface BulkProcessingConfig {
   maxConcurrentRequests: number;
   retryFailedKeywords: boolean;
   maxRetries: number;
+  adaptiveDelay: boolean;
 }
 
 export class BulkKeywordProcessor {
@@ -19,15 +20,18 @@ export class BulkKeywordProcessor {
   private failedKeywords: string[] = [];
   private successfulResults: ISearchResult[] = [];
   private startTime = 0;
+  private currentBatchDelay = 0;
 
   constructor() {
     this.config = {
       batchSize: parseInt(process.env.BULK_PROCESSING_BATCH_SIZE || '5'),
-      delayBetweenBatches: parseInt(process.env.BULK_PROCESSING_DELAY || '1000'),
-      maxConcurrentRequests: parseInt(process.env.MAX_CONCURRENT_REQUESTS || '3'),
-      retryFailedKeywords: true,
-      maxRetries: 2
+      delayBetweenBatches: parseInt(process.env.BULK_PROCESSING_DELAY || '2000'),
+      maxConcurrentRequests: parseInt(process.env.MAX_CONCURRENT_REQUESTS || '2'), // Reduced for better stability
+      retryFailedKeywords: process.env.RETRY_FAILED_KEYWORDS !== 'false',
+      maxRetries: parseInt(process.env.BULK_MAX_RETRIES || '2'),
+      adaptiveDelay: process.env.ADAPTIVE_DELAY !== 'false'
     };
+    this.currentBatchDelay = this.config.delayBetweenBatches;
   }
 
   async processBulkKeywords(
@@ -40,22 +44,38 @@ export class BulkKeywordProcessor {
     this.processedCount = 0;
     this.failedKeywords = [];
     this.successfulResults = [];
+    this.currentBatchDelay = this.config.delayBetweenBatches;
 
     const totalKeywords = keywords.length;
-    logger.info(`Starting bulk processing of ${totalKeywords} keywords for domain: ${options.domain}`);
+    logger.info(`🚀 Starting bulk processing of ${totalKeywords} keywords for domain: ${options.domain}`);
+    logger.info(`📊 Configuration: batchSize=${this.config.batchSize}, maxConcurrent=${this.config.maxConcurrentRequests}, delay=${this.currentBatchDelay}ms`);
+    
+    // Validate keywords
+    const validKeywords = keywords.filter(k => k && k.trim().length > 0).map(k => k.trim());
+    if (validKeywords.length !== keywords.length) {
+      logger.warn(`Filtered ${keywords.length - validKeywords.length} invalid keywords`);
+    }
     
     // Split keywords into batches
-    const batches = this.createBatches(keywords, this.config.batchSize);
+    const batches = this.createBatches(validKeywords, this.config.batchSize);
+    logger.info(`📦 Created ${batches.length} batches for processing`);
     
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
-      logger.info(`Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} keywords)`);
+      const batchStartTime = Date.now();
+      
+      logger.info(`🔄 Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} keywords)`);
       
       try {
         // Process batch with concurrent requests
-        const batchResults = await this.processBatch(batch, options);
+        const batchResults = await this.processBatch(batch, options, batchIndex + 1, batches.length);
         this.successfulResults.push(...batchResults);
         this.processedCount += batch.length;
+        
+        const batchTime = Date.now() - batchStartTime;
+        const avgTimePerKeyword = batchTime / batch.length;
+        
+        logger.info(`✅ Batch ${batchIndex + 1} completed in ${batchTime}ms (avg ${Math.round(avgTimePerKeyword)}ms/keyword)`);
         
         // Update progress
         if (onProgress) {
@@ -70,17 +90,33 @@ export class BulkKeywordProcessor {
           });
         }
         
-        // Delay between batches to respect rate limits
+        // Adaptive delay between batches
         if (batchIndex < batches.length - 1) {
-          await delay(this.config.delayBetweenBatches);
+          if (this.config.adaptiveDelay) {
+            const keyStats = this.serpApiManager.getKeyStats();
+            const usageRate = keyStats.totalUsageToday / keyStats.totalCapacity;
+            
+            // Increase delay if usage is high or there were errors in this batch
+            if (usageRate > 0.8 || batchResults.length < batch.length * 0.8) {
+              this.currentBatchDelay = Math.min(this.currentBatchDelay * 1.5, 10000);
+              logger.info(`📈 Increased batch delay to ${this.currentBatchDelay}ms (usage: ${Math.round(usageRate * 100)}%)`);
+            } else if (batchResults.length === batch.length && this.currentBatchDelay > this.config.delayBetweenBatches) {
+              this.currentBatchDelay = Math.max(this.currentBatchDelay * 0.8, this.config.delayBetweenBatches);
+              logger.info(`📉 Decreased batch delay to ${this.currentBatchDelay}ms`);
+            }
+          }
+          
+          logger.debug(`⏳ Waiting ${this.currentBatchDelay}ms before next batch...`);
+          await delay(this.currentBatchDelay);
         }
         
       } catch (error) {
-        logger.error(`Batch ${batchIndex + 1} failed:`, error);
+        logger.error(`❌ Batch ${batchIndex + 1} failed:`, error);
         
         // Add failed keywords to retry queue
         if (this.config.retryFailedKeywords) {
           this.failedKeywords.push(...batch);
+          logger.warn(`Added ${batch.length} keywords to retry queue`);
         }
         continue;
       }
@@ -88,13 +124,18 @@ export class BulkKeywordProcessor {
     
     // Retry failed keywords if enabled
     if (this.config.retryFailedKeywords && this.failedKeywords.length > 0) {
-      logger.info(`Retrying ${this.failedKeywords.length} failed keywords...`);
+      logger.info(`🔄 Retrying ${this.failedKeywords.length} failed keywords...`);
       await this.retryFailedKeywords(options, onProgress);
     }
     
     const processingTime = Date.now() - this.startTime;
+    const successRate = (this.successfulResults.length / totalKeywords) * 100;
     
-    logger.info(`Bulk processing completed: ${this.successfulResults.length}/${totalKeywords} successful (${processingTime}ms)`);
+    logger.info(`🏁 Bulk processing completed:`);
+    logger.info(`   ✅ Successful: ${this.successfulResults.length}/${totalKeywords} (${Math.round(successRate)}%)`);
+    logger.info(`   ❌ Failed: ${this.failedKeywords.length}`);
+    logger.info(`   ⏱️ Total time: ${Math.round(processingTime / 1000)}s`);
+    logger.info(`   📊 Average: ${Math.round(processingTime / this.successfulResults.length)}ms per successful keyword`);
     
     return {
       totalProcessed: this.processedCount,
@@ -105,19 +146,30 @@ export class BulkKeywordProcessor {
     };
   }
 
-  private async processBatch(keywords: string[], options: ISearchOptions): Promise<ISearchResult[]> {
+  private async processBatch(
+    keywords: string[], 
+    options: ISearchOptions,
+    batchNumber: number,
+    totalBatches: number
+  ): Promise<ISearchResult[]> {
     const results: ISearchResult[] = [];
     const semaphore = new Semaphore(this.config.maxConcurrentRequests);
     
-    const promises = keywords.map(async (keyword) => {
+    const promises = keywords.map(async (keyword, index) => {
       return semaphore.acquire(async () => {
+        const keywordStartTime = Date.now();
         try {
-          logger.debug(`Processing: "${keyword}"`);
+          logger.debug(`[${batchNumber}/${totalBatches}] Processing: "${keyword}" (${index + 1}/${keywords.length})`);
+          
           const result = await this.serpApiManager.trackKeyword(keyword, options);
-          logger.debug(`Completed: "${keyword}" - Position: ${result.position || 'Not Found'}`);
+          
+          const keywordTime = Date.now() - keywordStartTime;
+          logger.debug(`[${batchNumber}/${totalBatches}] ✅ "${keyword}" completed in ${keywordTime}ms - Position: ${result.position || 'Not Found'}`);
+          
           return result;
         } catch (error) {
-          logger.error(`Failed: "${keyword}" - ${(error as Error).message}`);
+          const keywordTime = Date.now() - keywordStartTime;
+          logger.error(`[${batchNumber}/${totalBatches}] ❌ "${keyword}" failed in ${keywordTime}ms: ${(error as Error).message}`);
           throw error;
         }
       });
@@ -130,8 +182,13 @@ export class BulkKeywordProcessor {
       if (result.status === 'fulfilled') {
         results.push(result.value);
       } else {
-        logger.error(`Keyword "${keywords[index]}" failed:`, result.reason);
-        this.failedKeywords.push(keywords[index]);
+        const keyword = keywords[index];
+        logger.error(`Keyword "${keyword}" processing failed:`, result.reason);
+        
+        // Add to failed list if not already there
+        if (!this.failedKeywords.includes(keyword)) {
+          this.failedKeywords.push(keyword);
+        }
       }
     });
     
@@ -146,24 +203,26 @@ export class BulkKeywordProcessor {
     let keywordsToRetry = [...this.failedKeywords];
     
     while (keywordsToRetry.length > 0 && retryAttempt <= this.config.maxRetries) {
-      logger.info(`Retry attempt ${retryAttempt}/${this.config.maxRetries} for ${keywordsToRetry.length} keywords`);
+      logger.info(`🔄 Retry attempt ${retryAttempt}/${this.config.maxRetries} for ${keywordsToRetry.length} keywords`);
       
       const retryResults: string[] = [];
+      const retryDelay = Math.min(this.config.delayBetweenBatches * retryAttempt, 5000);
       
       for (const keyword of keywordsToRetry) {
         try {
-          await delay(2000); // Longer delay for retries
+          await delay(retryDelay); // Longer delay for retries
           
+          logger.debug(`Retrying: "${keyword}"`);
           const result = await this.serpApiManager.trackKeyword(keyword, options);
           this.successfulResults.push(result);
           
           // Remove from failed list
           this.failedKeywords = this.failedKeywords.filter(k => k !== keyword);
           
-          logger.info(`Retry successful: "${keyword}" - Position: ${result.position || 'Not Found'}`);
+          logger.info(`✅ Retry successful: "${keyword}" - Position: ${result.position || 'Not Found'}`);
           
         } catch (error) {
-          logger.error(`Retry failed: "${keyword}" - ${(error as Error).message}`);
+          logger.error(`❌ Retry failed: "${keyword}" - ${(error as Error).message}`);
           retryResults.push(keyword);
         }
         
@@ -184,6 +243,17 @@ export class BulkKeywordProcessor {
       
       keywordsToRetry = retryResults;
       retryAttempt++;
+      
+      // Increase delay between retry attempts
+      if (keywordsToRetry.length > 0 && retryAttempt <= this.config.maxRetries) {
+        const retryPauseTime = retryDelay * 2;
+        logger.info(`⏳ Pausing ${retryPauseTime}ms before next retry attempt...`);
+        await delay(retryPauseTime);
+      }
+    }
+    
+    if (this.failedKeywords.length > 0) {
+      logger.warn(`⚠️ ${this.failedKeywords.length} keywords still failed after all retry attempts`);
     }
   }
 
@@ -194,9 +264,26 @@ export class BulkKeywordProcessor {
     }
     return batches;
   }
+
+  // Get processing statistics
+  public getProcessingStats() {
+    const currentTime = Date.now();
+    const elapsedTime = this.startTime ? currentTime - this.startTime : 0;
+    
+    return {
+      processed: this.processedCount,
+      successful: this.successfulResults.length,
+      failed: this.failedKeywords.length,
+      elapsedTime,
+      averageTimePerKeyword: this.successfulResults.length > 0 ? 
+        Math.round(elapsedTime / this.successfulResults.length) : 0,
+      successRate: this.processedCount > 0 ? 
+        Math.round((this.successfulResults.length / this.processedCount) * 100) : 0
+    };
+  }
 }
 
-// Semaphore for concurrent request limiting
+// Semaphore for concurrent request limiting with better error handling
 class Semaphore {
   private permits: number;
   private waiting: (() => void)[] = [];
@@ -232,5 +319,13 @@ class Semaphore {
       this.permits--;
       next();
     }
+  }
+
+  // Get current state for debugging
+  public getState() {
+    return {
+      availablePermits: this.permits,
+      waitingTasks: this.waiting.length
+    };
   }
 }

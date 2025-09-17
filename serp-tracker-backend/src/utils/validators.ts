@@ -5,11 +5,13 @@ export const validateSearchRequest = (data: any) => {
     keyword: Joi.string().required().min(1).max(500).trim(),
     domain: Joi.string().required().min(1).max(255).trim(),
     country: Joi.string().required().length(2).uppercase(),
-    city: Joi.string().optional().max(100).trim(),
-    state: Joi.string().optional().max(50).trim(),
-    postalCode: Joi.string().optional().max(20).trim(),
+    city: Joi.string().optional().max(100).trim().allow(''),
+    state: Joi.string().optional().max(50).trim().allow(''),
+    postalCode: Joi.string().optional().max(20).trim().allow(''),
     language: Joi.string().optional().length(2).lowercase().default('en'),
-    device: Joi.string().optional().valid('desktop', 'mobile', 'tablet').default('desktop')
+    device: Joi.string().optional().valid('desktop', 'mobile', 'tablet').default('desktop'),
+    businessName: Joi.string().optional().max(200).trim().allow(''),
+    apiKey: Joi.string().optional().max(64).trim()
   });
 
   return schema.validate(data, { abortEarly: false });
@@ -25,11 +27,13 @@ export const validateBulkSearchRequest = (data: any) => {
       .unique(),
     domain: Joi.string().required().min(1).max(255).trim(),
     country: Joi.string().required().length(2).uppercase(),
-    city: Joi.string().optional().max(100).trim(),
-    state: Joi.string().optional().max(50).trim(),
-    postalCode: Joi.string().optional().max(20).trim(),
+    city: Joi.string().optional().max(100).trim().allow(''),
+    state: Joi.string().optional().max(50).trim().allow(''),
+    postalCode: Joi.string().optional().max(20).trim().allow(''),
     language: Joi.string().optional().length(2).lowercase().default('en'),
-    device: Joi.string().optional().valid('desktop', 'mobile', 'tablet').default('desktop')
+    device: Joi.string().optional().valid('desktop', 'mobile', 'tablet').default('desktop'),
+    businessName: Joi.string().optional().max(200).trim().allow(''),
+    apiKey: Joi.string().optional().max(64).trim()
   });
 
   return schema.validate(data, { abortEarly: false });
@@ -42,8 +46,106 @@ export const validateQueryParams = (params: any) => {
     sortBy: Joi.string().valid('timestamp', 'keyword', 'domain', 'position', 'found').default('timestamp'),
     sortOrder: Joi.string().valid('asc', 'desc').default('desc'),
     dateFrom: Joi.date().iso().optional(),
-    dateTo: Joi.date().iso().min(Joi.ref('dateFrom')).optional()
+    dateTo: Joi.date().iso().min(Joi.ref('dateFrom')).optional(),
+    domain: Joi.string().optional().max(255).trim(),
+    keyword: Joi.string().optional().max(500).trim(),
+    country: Joi.string().optional().length(2).uppercase(),
+    found: Joi.boolean().optional()
   });
 
   return schema.validate(params, { abortEarly: false, allowUnknown: true });
+};
+
+export const validateAnalyticsRequest = (params: any) => {
+  const schema = Joi.object({
+    domain: Joi.string().required().min(1).max(255).trim(),
+    days: Joi.number().integer().min(1).max(365).default(30),
+    keyword: Joi.string().optional().max(500).trim(),
+    country: Joi.string().optional().length(2).uppercase()
+  });
+
+  return schema.validate(params, { abortEarly: false });
+};
+
+export const validateExportRequest = (params: any) => {
+  const schema = Joi.object({
+    domain: Joi.string().optional().max(255).trim(),
+    format: Joi.string().valid('csv', 'json', 'xlsx').default('csv'),
+    dateFrom: Joi.date().iso().optional(),
+    dateTo: Joi.date().iso().min(Joi.ref('dateFrom')).optional(),
+    found: Joi.boolean().optional(),
+    country: Joi.string().optional().length(2).uppercase(),
+    limit: Joi.number().integer().min(1).max(10000).default(1000)
+  });
+
+  return schema.validate(params, { abortEarly: false, allowUnknown: true });
+};
+
+// Validate API key format
+export const validateApiKeyFormat = (apiKey: string): boolean => {
+  // Basic validation for SerpApi key format
+  if (!apiKey || typeof apiKey !== 'string') {
+    return false;
+  }
+  
+  // SerpApi keys are typically 64-character hex strings
+  const serpApiKeyRegex = /^[a-f0-9]{64}$/i;
+  
+  return serpApiKeyRegex.test(apiKey) || apiKey.length >= 32;
+};
+
+// Validate domain format
+export const validateDomainFormat = (domain: string): boolean => {
+  if (!domain || typeof domain !== 'string') {
+    return false;
+  }
+  
+  // Remove protocol if present
+  const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/^www\./, '');
+  
+  // Basic domain validation regex
+  const domainRegex = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9](?:\.[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9])*$/;
+  
+  return domainRegex.test(cleanDomain);
+};
+
+// Validate keyword format
+export const validateKeywordFormat = (keyword: string): boolean => {
+  if (!keyword || typeof keyword !== 'string') {
+    return false;
+  }
+  
+  const trimmed = keyword.trim();
+  
+  // Check length
+  if (trimmed.length < 1 || trimmed.length > 500) {
+    return false;
+  }
+  
+  // Check for valid characters (allow letters, numbers, spaces, and common punctuation)
+  const keywordRegex = /^[a-zA-Z0-9\s\-_.,!?'"()&+]*$/;
+  
+  return keywordRegex.test(trimmed);
+};
+
+// Validate country code
+export const validateCountryCode = (country: string): boolean => {
+  if (!country || typeof country !== 'string' || country.length !== 2) {
+    return false;
+  }
+  
+  // List of valid country codes supported by most search engines
+  const validCountries = [
+    'US', 'CA', 'GB', 'AU', 'DE', 'FR', 'ES', 'IT', 'NL', 'SE', 'NO', 'DK', 'FI',
+    'JP', 'KR', 'CN', 'IN', 'BR', 'MX', 'AR', 'CL', 'CO', 'PE', 'ZA', 'EG',
+    'NG', 'KE', 'GH', 'RU', 'PL', 'CZ', 'HU', 'RO', 'GR', 'PT', 'BE', 'AT',
+    'CH', 'IE', 'SG', 'MY', 'TH', 'ID', 'PH', 'VN', 'PK', 'BD', 'LK', 'NP',
+    'AE', 'SA', 'IL', 'TR', 'UA', 'BY', 'LT', 'LV', 'EE', 'HR', 'SI', 'SK',
+    'BG', 'RS', 'BA', 'MK', 'AL', 'MT', 'CY', 'LU', 'IS', 'MD', 'AM', 'GE',
+    'AZ', 'KZ', 'UZ', 'TM', 'KG', 'TJ', 'AF', 'IQ', 'IR', 'LB', 'JO', 'SY',
+    'YE', 'OM', 'QA', 'BH', 'KW', 'LY', 'DZ', 'TN', 'MA', 'SD', 'ET', 'UG',
+    'TZ', 'KE', 'RW', 'MW', 'ZM', 'ZW', 'BW', 'NA', 'MZ', 'MG', 'MU', 'SC'
+  ];
+  
+  return validCountries.includes(country.toUpperCase());
 };
