@@ -20,6 +20,7 @@ interface GetSerpAnalysisInput {
   businessName?: string;
 }
 
+// Generate historical data for trend visualization
 function generateHistoricalData(
   endRank: number,
   weeks: number,
@@ -27,12 +28,15 @@ function generateHistoricalData(
 ): { rank: number; previousRank: number; historical: { date: string; rank: number }[] } {
   const historical: { date: string; rank: number }[] = [];
   let currentRank = endRank;
+  
   if (trend === 'up') {
     currentRank = endRank + Math.floor(Math.random() * 5) + weeks;
   } else if (trend === 'down') {
     currentRank = endRank - Math.floor(Math.random() * 5) - weeks;
   }
+  
   currentRank = Math.max(1, currentRank);
+  
   for (let i = 0; i < weeks; i++) {
     const date = new Date();
     date.setDate(date.getDate() - (weeks - 1 - i) * 7);
@@ -40,6 +44,7 @@ function generateHistoricalData(
       date: date.toISOString().split('T')[0],
       rank: Math.max(1, currentRank),
     });
+    
     if (trend === 'up') {
       currentRank -= Math.floor(Math.random() * 3) + (i > weeks / 2 ? 1 : 0);
     } else if (trend === 'down') {
@@ -48,8 +53,10 @@ function generateHistoricalData(
       currentRank += Math.floor(Math.random() * 3) - 1;
     }
   }
+  
   const finalRank = Math.max(1, trend === 'stable' ? endRank : currentRank);
   historical[weeks - 1].rank = finalRank;
+  
   return {
     rank: finalRank,
     previousRank: historical[weeks - 2]?.rank || finalRank,
@@ -59,17 +66,24 @@ function generateHistoricalData(
 
 export const trackSingleKeyword = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
+    const startTime = Date.now();
     const { error, value } = validateSearchRequest(req.body);
+    
     if (error) {
       const response: ApiResponse = {
         success: false,
-        message: error.details.map(d => d.message).join(', ')
+        message: 'Validation failed',
+        errors: error.details.map(d => d.message)
       };
       res.status(400).json(response);
       return;
     }
 
-    logger.info(`Tracking single keyword: "${value.keyword}" for domain: ${value.domain}`);
+    logger.info(`🎯 Tracking single keyword: "${value.keyword}" for domain: ${value.domain}`, {
+      country: value.country,
+      city: value.city,
+      hasApiKey: !!value.apiKey
+    });
     
     const serpApiManager = SerpApiPoolManager.getInstance();
     const result = await serpApiManager.trackKeyword(value.keyword, {
@@ -79,37 +93,52 @@ export const trackSingleKeyword = async (req: Request, res: Response, next: Next
       state: value.state,
       postalCode: value.postalCode,
       language: value.language,
-      device: value.device
+      device: value.device,
+      apiKey: value.apiKey
     });
 
+    const processingTime = Date.now() - startTime;
     const response: ApiResponse = {
       success: true,
-      data: result,
+      data: {
+        ...result,
+        processingTime
+      },
       keyStats: serpApiManager.getKeyStats()
     };
 
-    logger.info(`Single keyword tracking completed: "${value.keyword}" - Position: ${result.position || 'Not Found'}`);
+    logger.info(`✅ Single keyword tracking completed: "${value.keyword}" - Position: ${result.position || 'Not Found'} (${processingTime}ms)`);
     res.status(200).json(response);
 
   } catch (error) {
-    logger.error('Error in trackSingleKeyword:', error);
-    next(error);
+    logger.error('❌ Error in trackSingleKeyword:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to track keyword',
+      error: (error as Error).message
+    });
   }
 };
 
 export const trackBulkKeywords = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
+    const startTime = Date.now();
     const { error, value } = validateBulkSearchRequest(req.body);
+    
     if (error) {
       const response: ApiResponse = {
         success: false,
-        message: error.details.map(d => d.message).join(', ')
+        message: 'Validation failed',
+        errors: error.details.map(d => d.message)
       };
       res.status(400).json(response);
       return;
     }
 
-    logger.info(`Tracking bulk keywords: ${value.keywords.length} keywords for domain: ${value.domain}`);
+    logger.info(`📦 Tracking bulk keywords: ${value.keywords.length} keywords for domain: ${value.domain}`, {
+      country: value.country,
+      hasApiKey: !!value.apiKey
+    });
     
     const bulkProcessor = new BulkKeywordProcessor();
     const results = await bulkProcessor.processBulkKeywords(
@@ -121,57 +150,136 @@ export const trackBulkKeywords = async (req: Request, res: Response, next: NextF
         state: value.state,
         postalCode: value.postalCode,
         language: value.language,
-        device: value.device
+        device: value.device,
+        apiKey: value.apiKey
       }
     );
 
+    const processingTime = Date.now() - startTime;
     const response: ApiResponse = {
       success: true,
-      data: results
+      data: {
+        ...results,
+        totalProcessingTime: processingTime
+      }
     };
 
-    logger.info(`Bulk keyword tracking completed: ${results.successful.length}/${value.keywords.length} successful`);
+    logger.info(`✅ Bulk keyword tracking completed: ${results.successful.length}/${value.keywords.length} successful (${processingTime}ms)`);
     res.status(200).json(response);
 
   } catch (error) {
-    logger.error('Error in trackBulkKeywords:', error);
-    next(error);
+    logger.error('❌ Error in trackBulkKeywords:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to track bulk keywords',
+      error: (error as Error).message
+    });
   }
 };
 
 export const getSerpAnalysis = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    // Handle both single keyword and array of keywords
-    let validationResult;
+    const startTime = Date.now();
+    
+    // Comprehensive input validation
     const requestData = req.body as GetSerpAnalysisInput;
     
-    // Convert keywords to array if it's a string
-    if (typeof requestData.keywords === 'string') {
-      requestData.keywords = [requestData.keywords];
-    }
-
-    // Use bulk validation for all requests
-    validationResult = validateBulkSearchRequest(requestData);
-
-    if (validationResult.error) {
-      const response: ApiResponse = {
+    if (!requestData || typeof requestData !== 'object') {
+      res.status(400).json({
         success: false,
-        message: validationResult.error.details.map(d => d.message).join(', ')
-      };
-      res.status(400).json(response);
+        message: 'Invalid request body. Expected JSON object.',
+        example: {
+          keywords: ['keyword1', 'keyword2'],
+          domain: 'example.com',
+          country: 'US'
+        }
+      });
       return;
     }
 
-    const { keywords, domain, country, city, state, postalCode, language, device, apiKey } = validationResult.value;
+    // Normalize keywords input
+    let keywords: string[];
+    if (typeof requestData.keywords === 'string') {
+      keywords = [requestData.keywords];
+    } else if (Array.isArray(requestData.keywords)) {
+      keywords = requestData.keywords.filter(k => k && typeof k === 'string' && k.trim().length > 0);
+    } else {
+      res.status(400).json({
+        success: false,
+        message: 'Keywords must be a string or array of strings'
+      });
+      return;
+    }
+
+    if (keywords.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'At least one keyword is required'
+      });
+      return;
+    }
+
+    // Validate required fields
+    if (!requestData.domain || !requestData.country) {
+      res.status(400).json({
+        success: false,
+        message: 'Domain and country are required fields',
+        received: {
+          domain: !!requestData.domain,
+          country: !!requestData.country
+        }
+      });
+      return;
+    }
+
+    // Sanitize and prepare data
+    const sanitizedData = {
+      keywords,
+      domain: requestData.domain.trim(),
+      country: requestData.country.trim().toUpperCase(),
+      city: requestData.city?.trim() || '',
+      state: requestData.state?.trim() || '',
+      postalCode: requestData.postalCode?.trim() || '',
+      language: requestData.language?.toLowerCase() || 'en',
+      device: requestData.device || 'desktop',
+      apiKey: requestData.apiKey?.trim(),
+      businessName: requestData.businessName?.trim() || ''
+    };
+
+    // Validate with Joi
+    const validationResult = validateBulkSearchRequest(sanitizedData);
+    if (validationResult.error) {
+      res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: validationResult.error.details.map(d => d.message)
+      });
+      return;
+    }
+
+    const { domain, country, city, state, postalCode, language, device, apiKey } = sanitizedData;
+    
+    logger.info(`🔍 Starting SERP analysis for ${keywords.length} keywords on domain: ${domain}`, {
+      country,
+      location: [city, state].filter(Boolean).join(', '),
+      hasUserApiKey: !!apiKey,
+      keywordCount: keywords.length
+    });
+
     let serpData: any[] = [];
     let aiInsights = '';
+    let processingDetails = {
+      successful: 0,
+      failed: 0,
+      totalProcessingTime: 0,
+      averageTimePerKeyword: 0
+    };
 
-    logger.info(`Starting SERP analysis for ${keywords.length} keywords on domain: ${domain}`);
+    const serpApiManager = SerpApiPoolManager.getInstance();
 
     if (keywords.length === 1) {
       // Single keyword processing
       try {
-        const serpApiManager = SerpApiPoolManager.getInstance();
         const result = await serpApiManager.trackKeyword(keywords[0], {
           domain,
           country,
@@ -179,11 +287,10 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
           state,
           postalCode,
           language,
-          device,
+          device: (device as 'desktop' | 'mobile' | 'tablet') || 'desktop',
           apiKey
         });
 
-        // Generate previous rank for trend analysis
         const previousRank = result.position ? 
           Math.max(1, result.position + Math.floor(Math.random() * 10) - 5) : 
           Math.floor(Math.random() * 50) + 51;
@@ -199,15 +306,19 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
           found: result.found,
           totalResults: result.totalResults,
           country: result.country,
-          location: [city, state].filter(Boolean).join(', ') || country
+          location: [city, state].filter(Boolean).join(', ') || country,
+          timestamp: result.timestamp
         }];
 
-        aiInsights = result.found ? 
-          `Keyword "${keywords[0]}" found at position ${result.position} for ${domain}. ${result.totalResults.toLocaleString()} total search results available.` :
-          `Keyword "${keywords[0]}" not found in top 150 results for ${domain}. ${result.totalResults.toLocaleString()} total search results available. Consider optimizing content for this keyword.`;
+        processingDetails.successful = 1;
+        processingDetails.failed = 0;
+
+        aiInsights = result.found && result.position ? 
+          `Keyword "${keywords[0]}" ranks at position ${result.position} for ${domain}. Out of ${result.totalResults.toLocaleString()} total search results, your domain appears in the top ${result.position} results. ${result.position <= 10 ? 'Excellent ranking in the top 10!' : result.position <= 20 ? 'Good ranking in the top 20.' : 'Consider SEO optimization to improve ranking.'}` :
+          `Keyword "${keywords[0]}" was not found in the top 100 search results for ${domain}. With ${result.totalResults.toLocaleString()} total search results available, there's significant opportunity for SEO improvement. Consider optimizing your content for this keyword.`;
           
       } catch (error) {
-        logger.error('Single keyword tracking failed:', error);
+        logger.error('❌ Single keyword tracking failed:', error);
         throw error;
       }
     } else {
@@ -221,7 +332,7 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
           state,
           postalCode,
           language,
-          device,
+          device: (device as 'desktop' | 'mobile' | 'tablet') || 'desktop',
           apiKey
         });
 
@@ -241,11 +352,12 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
             found: result.found,
             totalResults: result.totalResults,
             country: result.country,
-            location: [city, state].filter(Boolean).join(', ') || country
+            location: [city, state].filter(Boolean).join(', ') || country,
+            timestamp: result.timestamp
           };
         });
 
-        // Add failed keywords with rank 0
+        // Add failed keywords with proper structure
         results.failed.forEach((failedKeyword: string) => {
           serpData.push({
             keyword: failedKeyword,
@@ -259,40 +371,98 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
             totalResults: 0,
             country: country,
             location: [city, state].filter(Boolean).join(', ') || country,
-            error: 'Failed to process'
+            error: 'Failed to process keyword',
+            timestamp: new Date()
           });
         });
 
-        const foundCount = results.successful.filter(r => r.found).length;
-        const avgPosition = results.successful
-          .filter(r => r.position)
-          .reduce((sum, r) => sum + (r.position || 0), 0) / foundCount || 0;
+        processingDetails.successful = results.successful.length;
+        processingDetails.failed = results.failed.length;
 
-        aiInsights = `Processed ${keywords.length} keywords for ${domain}. ` +
-          `${foundCount} keywords found in search results (${Math.round((foundCount/keywords.length)*100)}% visibility). ` +
-          `${results.failed.length} keywords failed processing. ` +
-          (foundCount > 0 ? `Average ranking position: ${Math.round(avgPosition)}.` : '') +
-          (foundCount < keywords.length * 0.5 ? ' Consider improving SEO strategy for better visibility.' : '');
+        const foundCount = results.successful.filter(r => r.found).length;
+        const avgPosition = foundCount > 0 ? 
+          results.successful
+            .filter(r => r.position)
+            .reduce((sum, r) => sum + (r.position || 0), 0) / foundCount : 0;
+
+        const visibilityRate = Math.round((foundCount / keywords.length) * 100);
+
+        aiInsights = `SERP Analysis Summary for ${domain}:\n` +
+          `• Processed ${keywords.length} keywords with ${foundCount} found in search results\n` +
+          `• Domain visibility: ${visibilityRate}% (${foundCount}/${keywords.length} keywords ranking)\n` +
+          `• ${results.failed.length} keywords failed processing\n` +
+          (foundCount > 0 ? `• Average ranking position: ${Math.round(avgPosition)}\n` : '') +
+          (visibilityRate >= 70 ? '• Excellent SEO performance! Most keywords are ranking well.' :
+           visibilityRate >= 40 ? '• Good SEO foundation with room for improvement.' :
+           '• Significant SEO opportunity - consider optimizing content for better keyword rankings.');
           
       } catch (error) {
-        logger.error('Bulk keyword tracking failed:', error);
+        logger.error('❌ Bulk keyword tracking failed:', error);
         throw error;
       }
     }
 
-    logger.info(`SERP analysis completed: ${serpData.filter(s => s.found).length}/${keywords.length} keywords found`);
+    const totalProcessingTime = Date.now() - startTime;
+    processingDetails.totalProcessingTime = totalProcessingTime;
+    processingDetails.averageTimePerKeyword = processingDetails.successful > 0 ? 
+      Math.round(totalProcessingTime / processingDetails.successful) : 0;
 
+    logger.info(`✅ SERP analysis completed: ${processingDetails.successful}/${keywords.length} keywords processed successfully (${totalProcessingTime}ms)`);
+
+    // Check if response has already been sent (e.g., by timeout middleware)
+    if (res.headersSent) {
+      logger.warn('⚠️ Response already sent, skipping response in getSerpAnalysis');
+      return;
+    }
+
+    const keyStats = serpApiManager.getKeyStats();
+    
     res.status(200).json({ 
       success: true, 
-      data: { serpData, aiInsights },
-      keyStats: SerpApiPoolManager.getInstance().getKeyStats()
+      data: { 
+        serpData, 
+        aiInsights,
+        processingDetails,
+        searchMetadata: {
+          domain,
+          country,
+          location: [city, state].filter(Boolean).join(', '),
+          language,
+          device,
+          timestamp: new Date().toISOString(),
+          totalKeywords: keywords.length
+        }
+      },
+      keyStats: {
+        ...keyStats,
+        userProvidedKey: !!apiKey
+      }
     });
 
   } catch (error) {
-    logger.error('Error in getSerpAnalysis:', error);
+    const errorMessage = (error as Error).message;
+    logger.error('❌ Error in getSerpAnalysis:', error);
+    
+    // Check if response has already been sent (e.g., by timeout middleware)
+    if (res.headersSent) {
+      logger.warn('⚠️ Response already sent, skipping error response in getSerpAnalysis');
+      return;
+    }
+    
+    // Provide user-friendly error messages
+    let userMessage = 'Failed to analyze keywords';
+    if (errorMessage.includes('API key')) {
+      userMessage = 'API key issue: ' + errorMessage;
+    } else if (errorMessage.includes('quota') || errorMessage.includes('limit')) {
+      userMessage = 'API quota exceeded. Please try again later or use a different API key.';
+    } else if (errorMessage.includes('timeout')) {
+      userMessage = 'Request timeout. Please try again with fewer keywords.';
+    }
+    
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to analyze keywords: ' + (error instanceof Error ? error.message : 'Unknown error')
+      message: userMessage,
+      details: process.env.NODE_ENV === 'development' ? errorMessage : undefined
     });
   }
 };
@@ -306,24 +476,36 @@ export const getSearchHistory = async (req: Request, res: Response, next: NextFu
     if (keyword) query.keyword = new RegExp(keyword as string, 'i');
     if (country) query.country = (country as string).toUpperCase();
 
-    const results = await SearchResultModel
-      .find(query)
-      .sort({ timestamp: -1 })
-      .limit(Number(limit))
-      .skip(Number(offset))
-      .lean();
-
-    const total = await SearchResultModel.countDocuments(query);
+    const [results, total] = await Promise.all([
+      SearchResultModel
+        .find(query)
+        .sort({ timestamp: -1 })
+        .limit(Number(limit))
+        .skip(Number(offset))
+        .lean(),
+      SearchResultModel.countDocuments(query)
+    ]);
 
     const response: ApiResponse = {
       success: true,
       data: {
-        results,
+        results: results.map(result => ({
+          ...result,
+          processingTime: (result as any).processingTime || null,
+          apiKeyUsed: (result as any).apiKeyUsed || 'unknown'
+        })),
         pagination: {
           total,
           limit: Number(limit),
           offset: Number(offset),
-          hasMore: total > Number(offset) + Number(limit)
+          hasMore: total > Number(offset) + Number(limit),
+          pages: Math.ceil(total / Number(limit)),
+          currentPage: Math.floor(Number(offset) / Number(limit)) + 1
+        },
+        summary: {
+          totalResults: total,
+          foundResults: results.filter(r => r.found).length,
+          averagePosition: results.filter(r => r.position).reduce((sum, r) => sum + (r.position || 0), 0) / results.filter(r => r.position).length || 0
         }
       }
     };
@@ -331,8 +513,12 @@ export const getSearchHistory = async (req: Request, res: Response, next: NextFu
     res.status(200).json(response);
 
   } catch (error) {
-    logger.error('Error in getSearchHistory:', error);
-    next(error);
+    logger.error('❌ Error in getSearchHistory:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve search history',
+      error: (error as Error).message
+    });
   }
 };
 
@@ -341,18 +527,16 @@ export const getKeywordAnalytics = async (req: Request, res: Response, next: Nex
     const { domain, days = 30 } = req.query;
 
     if (!domain) {
-      const response: ApiResponse = {
+      res.status(400).json({
         success: false,
         message: 'Domain parameter is required'
-      };
-      res.status(400).json(response);
+      });
       return;
     }
 
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - Number(days));
 
-    // Properly typed MongoDB aggregation pipeline
     const pipeline: PipelineStage[] = [
       {
         $match: {
@@ -369,7 +553,8 @@ export const getKeywordAnalytics = async (req: Request, res: Response, next: Nex
           position: { $first: '$position' },
           found: { $first: '$found' },
           url: { $first: '$url' },
-          title: { $first: '$title' }
+          title: { $first: '$title' },
+          totalResults: { $first: '$totalResults' }
         }
       },
       {
@@ -395,18 +580,30 @@ export const getKeywordAnalytics = async (req: Request, res: Response, next: Nex
             } 
           },
           latestUrl: { $last: '$url' },
-          latestTitle: { $last: '$title' }
+          latestTitle: { $last: '$title' },
+          avgTotalResults: { $avg: '$totalResults' }
         }
       },
       {
         $addFields: {
           visibilityRate: { 
             $round: [{ $multiply: [{ $divide: ['$foundCount', '$totalChecks'] }, 100] }, 2] 
+          },
+          trend: {
+            $cond: [
+              { $gte: ['$foundCount', { $multiply: ['$totalChecks', 0.8] }] },
+              'improving',
+              { $cond: [
+                { $lte: ['$foundCount', { $multiply: ['$totalChecks', 0.3] }] },
+                'declining',
+                'stable'
+              ]}
+            ]
           }
         }
       },
       {
-        $sort: { avgPosition: 1 as 1 | -1 }
+        $sort: { avgPosition: 1 }
       }
     ];
 
@@ -418,8 +615,13 @@ export const getKeywordAnalytics = async (req: Request, res: Response, next: Nex
       avgVisibilityRate: analytics.length > 0 
         ? Math.round(analytics.reduce((sum, a) => sum + a.visibilityRate, 0) / analytics.length * 100) / 100
         : 0,
-      topKeywords: analytics.slice(0, 5),
-      improvementOpportunities: analytics.filter(a => a.foundCount === 0 || a.avgPosition > 50).slice(0, 10)
+      topPerformers: analytics.filter(a => a.avgPosition && a.avgPosition <= 10).slice(0, 5),
+      improvementOpportunities: analytics.filter(a => a.foundCount === 0 || (a.avgPosition && a.avgPosition > 50)).slice(0, 10),
+      trends: {
+        improving: analytics.filter(a => a.trend === 'improving').length,
+        stable: analytics.filter(a => a.trend === 'stable').length,
+        declining: analytics.filter(a => a.trend === 'declining').length
+      }
     };
 
     const response: ApiResponse = {
@@ -427,21 +629,27 @@ export const getKeywordAnalytics = async (req: Request, res: Response, next: Nex
       data: {
         summary,
         keywords: analytics,
-        period: `${days} days`
+        period: `${days} days`,
+        domain: domain as string,
+        generatedAt: new Date().toISOString()
       }
     };
 
     res.status(200).json(response);
 
   } catch (error) {
-    logger.error('Error in getKeywordAnalytics:', error);
-    next(error);
+    logger.error('❌ Error in getKeywordAnalytics:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate keyword analytics',
+      error: (error as Error).message
+    });
   }
 };
 
 export const exportResults = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { domain, format = 'csv', dateFrom, dateTo, found } = req.query;
+    const { domain, format = 'csv', dateFrom, dateTo, found, limit = 1000 } = req.query;
 
     const query: any = {};
     if (domain) query.domain = domain;
@@ -452,27 +660,42 @@ export const exportResults = async (req: Request, res: Response, next: NextFunct
       if (dateTo) query.timestamp.$lte = new Date(dateTo as string);
     }
 
-    const results = await SearchResultModel.find(query).sort({ timestamp: -1 }).lean();
+    const results = await SearchResultModel
+      .find(query)
+      .sort({ timestamp: -1 })
+      .limit(Number(limit))
+      .lean();
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `serp-results-${domain || 'all'}-${timestamp}`;
 
     if (format === 'csv') {
       const csv = generateCSV(results);
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename="serp-results-${Date.now()}.csv"`);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
       res.send(csv);
     } else {
       res.setHeader('Content-Type', 'application/json');
-      res.setHeader('Content-Disposition', `attachment; filename="serp-results-${Date.now()}.json"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.json"`);
       res.json({
         success: true,
         data: results,
-        exportedAt: new Date().toISOString(),
-        totalRecords: results.length
+        metadata: {
+          exportedAt: new Date().toISOString(),
+          totalRecords: results.length,
+          filters: { domain, found, dateFrom, dateTo },
+          format: 'json'
+        }
       });
     }
 
   } catch (error) {
-    logger.error('Error in exportResults:', error);
-    next(error);
+    logger.error('❌ Error in exportResults:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to export results',
+      error: (error as Error).message
+    });
   }
 };
 
@@ -481,11 +704,10 @@ export const getKeywordTrends = async (req: Request, res: Response, next: NextFu
     const { domain, keyword, days = 30 } = req.query;
 
     if (!domain || !keyword) {
-      const response: ApiResponse = {
+      res.status(400).json({
         success: false,
         message: 'Domain and keyword parameters are required'
-      };
-      res.status(400).json(response);
+      });
       return;
     }
 
@@ -502,22 +724,53 @@ export const getKeywordTrends = async (req: Request, res: Response, next: NextFu
       .select('position found timestamp totalResults')
       .lean();
 
+    // Calculate trend analysis
+    const trendAnalysis = {
+      direction: 'stable' as 'up' | 'down' | 'stable',
+      change: 0,
+      volatility: 0
+    };
+
+    if (trends.length >= 2) {
+      const positions = trends.filter(t => t.position).map(t => t.position!);
+      if (positions.length >= 2) {
+        const firstPos = positions[0];
+        const lastPos = positions[positions.length - 1];
+        trendAnalysis.change = firstPos - lastPos;
+        trendAnalysis.direction = trendAnalysis.change > 0 ? 'up' : trendAnalysis.change < 0 ? 'down' : 'stable';
+        
+        // Calculate volatility (standard deviation)
+        const avg = positions.reduce((sum, pos) => sum + pos, 0) / positions.length;
+        const variance = positions.reduce((sum, pos) => sum + Math.pow(pos - avg, 2), 0) / positions.length;
+        trendAnalysis.volatility = Math.sqrt(variance);
+      }
+    }
+
     const response: ApiResponse = {
       success: true,
       data: {
         keyword,
         domain,
         trends,
-        period: `${days} days`,
-        dataPoints: trends.length
+        analysis: trendAnalysis,
+        summary: {
+          period: `${days} days`,
+          dataPoints: trends.length,
+          foundCount: trends.filter(t => t.found).length,
+          averagePosition: trends.filter(t => t.position).reduce((sum, t) => sum + (t.position || 0), 0) / trends.filter(t => t.position).length || null
+        }
       }
     };
 
     res.status(200).json(response);
 
   } catch (error) {
-    logger.error('Error in getKeywordTrends:', error);
-    next(error);
+    logger.error('❌ Error in getKeywordTrends:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve keyword trends',
+      error: (error as Error).message
+    });
   }
 };
 
@@ -530,15 +783,21 @@ export const getApiKeyStats = async (req: Request, res: Response) => {
     res.status(200).json({ 
       success: true, 
       data: {
-        ...stats,
-        details: detailedStats
+        summary: stats,
+        details: detailedStats,
+        capabilities: {
+          acceptsUserKeys: true,
+          hasEnvironmentKeys: stats.hasEnvironmentKeys,
+          rotationStrategy: process.env.SERPAPI_ROTATION_STRATEGY || 'priority'
+        }
       }
     });
   } catch (error) {
-    logger.error('Error in getApiKeyStats:', error);
+    logger.error('❌ Error in getApiKeyStats:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to fetch API key stats.' 
+      message: 'Failed to fetch API key statistics',
+      error: (error as Error).message
     });
   }
 };
@@ -554,9 +813,11 @@ function generateCSV(results: any[]): string {
   const headers = [
     'Keyword', 'Domain', 'Position', 'URL', 'Title', 'Description',
     'Country', 'City', 'State', 'Postal Code', 'Total Results',
-    'Searched Results', 'Found', 'Processing Time', 'Timestamp'
+    'Searched Results', 'Found', 'Processing Time', 'API Key Used', 'Timestamp'
   ];
+  
   const csvRows = [headers.join(',')];
+  
   for (const result of results) {
     const row = [
       escapeCSV(result.keyword),
@@ -569,13 +830,15 @@ function generateCSV(results: any[]): string {
       escapeCSV(result.city),
       escapeCSV(result.state),
       escapeCSV(result.postalCode),
-      result.totalResults,
-      result.searchedResults,
+      result.totalResults || 0,
+      result.searchedResults || 0,
       result.found ? 'Yes' : 'No',
-      result.processingTime || 'N/A',
+      (result as any).processingTime || 'N/A',
+      (result as any).apiKeyUsed || 'unknown',
       result.timestamp?.toISOString() || ''
     ];
     csvRows.push(row.join(','));
   }
+  
   return csvRows.join('\n');
 }

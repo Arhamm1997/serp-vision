@@ -10,6 +10,9 @@ export interface ApiResponse<T = any> {
     active: number;
     exhausted: number;
     totalUsageToday: number;
+    totalUsageThisMonth?: number;
+    totalMonthlyCapacity?: number;
+    monthlyUsagePercentage?: number;
   };
 }
 
@@ -24,6 +27,9 @@ export interface SerpAnalysisResponse {
     active: number;
     exhausted: number;
     totalUsageToday: number;
+    totalUsageThisMonth?: number;
+    totalMonthlyCapacity?: number;
+    monthlyUsagePercentage?: number;
   };
   message?: string;
   errors?: string[];

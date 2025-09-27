@@ -11,6 +11,7 @@ export interface IApiKeyDocument extends Document {
   lastUsed: Date;
   errorCount: number;
   successRate: number;
+  monthlyResetAt: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -30,6 +31,7 @@ const apiKeySchema = new Schema<IApiKeyDocument>({
   lastUsed: { type: Date, default: Date.now },
   errorCount: { type: Number, default: 0 },
   successRate: { type: Number, default: 100, min: 0, max: 100 },
+  monthlyResetAt: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });

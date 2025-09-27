@@ -1,0 +1,1043 @@
+// src/services/serpApiPoolManager.ts
+import fetch from 'node-fetch';
+import { logger } from '../utils/logger';
+import { ApiKeyModel } from '../models/ApiKey';
+import { SearchResultModel } from '../models/SearchResult';
+import { ISerpApiKey, ISearchOptions, ISearchResult } from '../types/api.types';
+
+export class SerpApiPoolManager {
+  private static instance: SerpApiPoolManager;
+  private apiKeys: ISerpApiKey[] = [];
+  private currentKeyIndex = 0;
+  private rotationStrategy: 'round-robin' | 'priority' | 'least-used' = 'priority';
+  private isInitialized = false;
+  private keyUsageLock = new Map<string, boolean>();
+
+  private constructor() {}
+
+  public static getInstance(): SerpApiPoolManager {
+    if (!SerpApiPoolManager.instance) {
+      SerpApiPoolManager.instance = new SerpApiPoolManager();
+    }
+    return SerpApiPoolManager.instance;
+  }
+
+  public async initialize(): Promise<void> {
+    if (this.isInitialized) {
+      logger.debug('SerpApi Pool Manager already initialized');
+      return;
+    }
+
+    await this.loadApiKeys();
+    this.rotationStrategy = (process.env.SERPAPI_ROTATION_STRATEGY as any) || 'priority';
+    
+    // Check for monthly reset on initialization
+    await this.checkAndResetMonthlyUsage();
+    
+    this.isInitialized = true;
+    
+    logger.info(`SerpApi Pool Manager initialized with ${this.apiKeys.length} keys using ${this.rotationStrategy} strategy`);
+    
+    // Log detailed key status
+    if (this.apiKeys.length > 0) {
+      this.apiKeys.forEach((key, index) => {
+        logger.info(`API Key ${index + 1}: Status=${key.status}, Used=${key.usedToday}/${key.dailyLimit}, Priority=${key.priority}`);
+      });
+    } else {
+      logger.info('No environment API keys found. Users can provide their own API keys.');
+    }
+  }
+
+  private async loadApiKeys(): Promise<void> {
+    const keys: ISerpApiKey[] = [];
+    let keyIndex = 1;
+    let maxKeyIndex = 10; // Prevent infinite loop by limiting max key index
+
+    // Load keys from environment variables
+    while (keyIndex <= maxKeyIndex) {
+      const key = process.env[`SERPAPI_KEY_${keyIndex}`] || 
+                   (keyIndex === 1 ? process.env.SERPAPI_KEY : '') || '';
+      
+      // Break loop if no environment variable exists
+      if (!process.env[`SERPAPI_KEY_${keyIndex}`] && !(keyIndex === 1 && process.env.SERPAPI_KEY)) {
+        break;
+      }
+      
+      // Skip if no key or if it's a placeholder value
+      if (!key || key.length < 10 || 
+          key === 'your_serpapi_key_here' || 
+          key.includes('your_second_serpapi_key_here') ||
+          key.includes('your_third_serpapi_key_here') ||
+          key.includes('CHANGE_ME') ||
+          key.includes('your_') ||
+          key.includes('_here')) {
+        keyIndex++;
+        continue;
+      }
+
+      keys.push({
+          id: `env_serpapi_${keyIndex}`,
+          key: key.trim(),
+          dailyLimit: parseInt(process.env[`SERPAPI_DAILY_LIMIT_${keyIndex}`] || process.env.SERPAPI_DAILY_LIMIT || '250'), // SerpAPI free tier: 250 per month
+          monthlyLimit: parseInt(process.env[`SERPAPI_MONTHLY_LIMIT_${keyIndex}`] || process.env.SERPAPI_MONTHLY_LIMIT || '250'), // Actual SerpAPI limit
+          usedToday: 0,
+          usedThisMonth: 0,
+          status: 'active',
+          priority: keyIndex,
+          lastUsed: new Date(),
+          errorCount: 0,
+          successRate: 100,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        });
+        logger.info(`Loaded environment API key ${keyIndex} with daily limit: ${keys[keys.length - 1].dailyLimit}`);
+      }
+      keyIndex++;
+    }
+
+    // Load existing usage data from database for environment keys
+    for (const keyConfig of keys) {
+      try {
+        const existingKey = await ApiKeyModel.findOne({ keyId: keyConfig.id });
+        if (existingKey) {
+          keyConfig.usedToday = existingKey.usedToday;
+          keyConfig.usedThisMonth = existingKey.usedThisMonth;
+          keyConfig.status = existingKey.status === 'exhausted' ? 'active' : existingKey.status;
+          keyConfig.errorCount = existingKey.errorCount;
+          keyConfig.successRate = existingKey.successRate;
+          keyConfig.lastUsed = existingKey.lastUsed;
+          logger.debug(`Restored usage data for key ${keyConfig.id}: ${keyConfig.usedToday}/${keyConfig.dailyLimit}`);
+        } else {
+          // Create new database entry
+          await ApiKeyModel.create({
+            keyId: keyConfig.id,
+            dailyLimit: keyConfig.dailyLimit,
+            monthlyLimit: keyConfig.monthlyLimit,
+            usedToday: 0,
+            usedThisMonth: 0,
+            status: 'active',
+            priority: keyConfig.priority,
+            errorCount: 0,
+            successRate: 100
+          });
+        }
+      } catch (error) {
+        logger.warn(`Failed to load existing data for key ${keyConfig.id}:`, error);
+      }
+    }
+
+    this.apiKeys = keys;
+    
+    if (keys.length > 0) {
+      const totalCapacity = keys.reduce((sum, k) => sum + k.dailyLimit, 0);
+      logger.info(`Loaded ${keys.length} environment SerpApi keys with total daily capacity: ${totalCapacity.toLocaleString()}`);
+    } else {
+      logger.info('No environment SerpApi keys found. API keys will be provided by users.');
+    }
+  }
+
+  public async trackKeyword(keyword: string, options: ISearchOptions & { apiKey?: string }): Promise<ISearchResult> {
+    if (!this.isInitialized) {
+      await this.initialize();
+    }
+
+    const startTime = Date.now();
+    const cleanKeyword = keyword.trim();
+
+    if (!cleanKeyword) {
+      throw new Error('Keyword cannot be empty');
+    }
+
+    // Validate required options
+    if (!options.domain || !options.country) {
+      throw new Error('Domain and country are required');
+    }
+
+    // Validate domain format
+    const cleanDomain = this.extractDomain(options.domain);
+    if (!cleanDomain) {
+      throw new Error('Invalid domain format provided');
+    }
+
+    // Enhance location validation and normalization
+    const location = this.normalizeLocationData(options);
+
+    logger.debug(`Starting keyword tracking for "${cleanKeyword}" on domain "${cleanDomain}"`, {
+      location: location.display,
+      hasUserApiKey: !!options.apiKey,
+      strategy: this.rotationStrategy
+    });
+
+    // If a specific API key is provided by user, use it directly
+    if (options.apiKey) {
+      return await this.trackWithUserProvidedKey(cleanKeyword, { ...options, ...location, apiKey: options.apiKey }, startTime);
+    }
+
+    // Use environment API keys
+    return await this.trackWithEnvironmentKeys(cleanKeyword, { ...options, ...location }, startTime);
+  }
+
+  private normalizeLocationData(options: ISearchOptions): {
+    country: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    display: string;
+  } {
+    const country = options.country.toUpperCase().trim();
+    const city = options.city?.trim() || '';
+    const state = options.state?.trim() || '';
+    const postalCode = options.postalCode?.trim() || '';
+
+    const locationParts = [city, state, postalCode].filter(Boolean);
+    const display = locationParts.length > 0 
+      ? `${locationParts.join(', ')}, ${country}`
+      : country;
+
+    return { country, city, state, postalCode, display };
+  }
+
+  private async trackWithUserProvidedKey(
+    keyword: string, 
+    options: ISearchOptions & { apiKey: string }, 
+    startTime: number
+  ): Promise<ISearchResult> {
+    const tempKeyConfig: ISerpApiKey = {
+      id: 'user-provided-key',
+      key: options.apiKey,
+      dailyLimit: 10000,
+      monthlyLimit: 100000,
+      usedToday: 0,
+      usedThisMonth: 0,
+      status: 'active',
+      priority: 0,
+      lastUsed: new Date(),
+      errorCount: 0,
+      successRate: 100,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    try {
+      logger.debug(`Using user-provided API key for keyword: "${keyword}"`);
+      const result = await this.makeRequest(tempKeyConfig, keyword, options);
+      (result as any).processingTime = Date.now() - startTime;
+      (result as any).apiKeyUsed = 'user-provided';
+
+      // Save result to database
+      await this.saveSearchResult(result);
+
+      logger.info(`✅ Keyword "${keyword}" tracked with user API key in ${(result as any).processingTime}ms - Position: ${result.position || 'Not Found'}`);
+      return result;
+    } catch (error) {
+      const errorMessage = (error as Error).message;
+      logger.error(`❌ User-provided API key failed for "${keyword}": ${errorMessage}`);
+      
+      // Provide more specific error messages
+      if (this.isQuotaExceeded(error)) {
+        throw new Error('Your API key has reached its quota limit. Please check your SerpApi account or try again later.');
+      } else if (this.isRateLimited(error)) {
+        throw new Error('Your API key is being rate limited. Please wait a moment before trying again.');
+      } else if (errorMessage.includes('401') || errorMessage.includes('unauthorized')) {
+        throw new Error('Invalid API key provided. Please check your SerpApi key and try again.');
+      } else {
+        throw new Error(`Failed to track keyword with provided API key: ${errorMessage}`);
+      }
+    }
+  }
+
+  private async trackWithEnvironmentKeys(
+    keyword: string, 
+    options: ISearchOptions, 
+    startTime: number
+  ): Promise<ISearchResult> {
+    if (this.apiKeys.length === 0) {
+      throw new Error('No API keys available. Please provide your own SerpApi key or configure environment keys.');
+    }
+
+    let lastError: Error | null = null;
+    const maxRetries = Math.min(this.apiKeys.length, parseInt(process.env.SERPAPI_MAX_RETRIES || '3'));
+
+    logger.debug(`Starting keyword tracking: "${keyword}" for domain: ${options.domain}`);
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const keyConfig = await this.getNextAvailableKey();
+
+      if (!keyConfig) {
+        throw new Error('All environment API keys are exhausted or unavailable. Please provide your own SerpApi key.');
+      }
+
+      // Lock this key during usage
+      if (this.keyUsageLock.get(keyConfig.id)) {
+        logger.debug(`Key ${keyConfig.id} is locked, trying next available key`);
+        continue;
+      }
+
+      this.keyUsageLock.set(keyConfig.id, true);
+
+      try {
+        logger.debug(`Using environment API key ${keyConfig.id} (attempt ${attempt + 1}/${maxRetries})`);
+        const result = await this.makeRequest(keyConfig, keyword, options);
+        
+        // Add processing metadata
+        (result as any).processingTime = Date.now() - startTime;
+        (result as any).apiKeyUsed = keyConfig.id;
+
+        // Update usage stats
+        await this.updateKeyUsage(keyConfig.id, true);
+
+        // Save result to database
+        await this.saveSearchResult(result);
+
+        logger.info(`✅ Keyword "${keyword}" tracked with ${keyConfig.id} in ${(result as any).processingTime}ms - Position: ${result.position || 'Not Found'}`);
+        return result;
+
+      } catch (error) {
+        lastError = error as Error;
+        logger.warn(`❌ Error with key ${keyConfig.id} for keyword "${keyword}": ${(error as Error).message}`);
+
+        if (this.isQuotaExceeded(error)) {
+          await this.markKeyExhausted(keyConfig.id);
+          logger.warn(`Key ${keyConfig.id} quota exceeded, marking as exhausted`);
+        } else if (this.isRateLimited(error)) {
+          await this.pauseKey(keyConfig.id, 60000);
+          logger.warn(`Key ${keyConfig.id} rate limited, pausing for 1 minute`);
+        } else {
+          await this.updateKeyUsage(keyConfig.id, false);
+        }
+      } finally {
+        this.keyUsageLock.delete(keyConfig.id);
+      }
+    }
+
+    throw new Error(`Failed to track keyword "${keyword}" with all available environment keys. ${lastError?.message}`);
+  }
+
+  private async getNextAvailableKey(): Promise<ISerpApiKey | null> {
+    const availableKeys = this.apiKeys.filter(key =>
+      key.status === 'active' &&
+      key.usedToday < key.dailyLimit &&
+      key.usedThisMonth < key.monthlyLimit &&
+      !this.keyUsageLock.get(key.id)
+    );
+
+    if (availableKeys.length === 0) {
+      logger.warn('No available environment API keys found');
+      return null;
+    }
+
+    let selectedKey: ISerpApiKey;
+
+    switch (this.rotationStrategy) {
+      case 'priority':
+        selectedKey = availableKeys.sort((a, b) => a.priority - b.priority)[0];
+        break;
+
+      case 'least-used':
+        selectedKey = availableKeys.sort((a, b) => a.usedToday - b.usedToday)[0];
+        break;
+
+      case 'round-robin':
+      default:
+        selectedKey = availableKeys[this.currentKeyIndex % availableKeys.length];
+        this.currentKeyIndex = (this.currentKeyIndex + 1) % availableKeys.length;
+        break;
+    }
+
+    logger.debug(`Selected key ${selectedKey.id} using ${this.rotationStrategy} strategy (${selectedKey.usedToday}/${selectedKey.dailyLimit} used)`);
+    return selectedKey;
+  }
+
+  private async makeRequest(keyConfig: ISerpApiKey, keyword: string, options: ISearchOptions): Promise<ISearchResult> {
+    const params = new URLSearchParams({
+      engine: 'google',
+      q: keyword.trim(),
+      api_key: keyConfig.key,
+      gl: options.country.toLowerCase(),
+      hl: options.language || 'en',
+      num: '100', // Get 100 results for comprehensive ranking check
+      device: options.device || 'desktop',
+      safe: 'off',
+      filter: '0',
+      start: '0'
+    });
+
+    // Enhanced location handling with proper formatting
+    const locationParts: string[] = [];
+    if (options.city) locationParts.push(options.city.trim());
+    if (options.state) locationParts.push(options.state.trim());
+    if (options.postalCode) locationParts.push(options.postalCode.trim());
+    
+    if (locationParts.length > 0) {
+      const location = locationParts.join(', ');
+      params.append('location', location);
+      // Add geo-location parameters for more accurate results
+      params.append('uule', this.generateUULE(location, options.country));
+    }
+
+    // Additional parameters for more accurate ranking
+    params.append('lr', `lang_${options.language || 'en'}`);
+    params.append('cr', `country${options.country.toUpperCase()}`);
+    params.append('no_cache', 'true'); // Get fresh results
+    params.append('async', 'false'); // Ensure synchronous processing
+
+    const url = `https://serpapi.com/search?${params.toString()}`;
+    const timeout = parseInt(process.env.REQUEST_TIMEOUT || '30000');
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      logger.debug(`Making SerpApi request: "${keyword}" in ${params.get('gl')} ${locationParts.length > 0 ? `(${locationParts.join(', ')})` : ''}`, {
+        keyId: keyConfig.id,
+        device: options.device,
+        language: options.language
+      });
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'SERP-Tracker/2.0 (Professional SERP Tracking Tool)',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        },
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        logger.error(`SerpApi HTTP error ${response.status}:`, errorText);
+        throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // Enhanced error checking
+      if ((data as any).error) {
+        logger.error('SerpApi returned error:', (data as any).error);
+        throw new Error(`SerpApi Error: ${(data as any).error}`);
+      }
+
+      if ((data as any).search_metadata?.status === 'Error') {
+        logger.error('SerpApi search metadata error:', (data as any).search_metadata);
+        throw new Error(`SerpApi Search Error: ${(data as any).search_metadata.error || 'Unknown error'}`);
+      }
+
+      // Check for quota/credit issues in response
+      if ((data as any).search_information?.query_displayed?.includes('quota') ||
+          (data as any).search_information?.query_displayed?.includes('credit')) {
+        throw new Error('API quota or credit limit reached');
+      }
+
+      return this.parseSearchResults(keyword, data, options);
+
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if ((error as any).name === 'AbortError') {
+        throw new Error(`Request timeout after ${timeout}ms`);
+      }
+      logger.error(`Request failed for keyword "${keyword}":`, error);
+      throw error;
+    }
+  }
+
+  // Generate UULE (Universally Unique Location Encoding) for better geo-targeting
+  private generateUULE(location: string, country: string): string {
+    try {
+      // Simple UULE generation - in production, you might want to use a proper UULE library
+      const locationString = `${location}, ${country}`;
+      const encoded = Buffer.from(locationString).toString('base64');
+      return `w+CAIQICI${encoded.substring(0, 20)}`;
+    } catch (error) {
+      logger.warn('Failed to generate UULE for location:', location);
+      return '';
+    }
+  }
+
+  private parseSearchResults(keyword: string, data: any, options: ISearchOptions): ISearchResult {
+    const organicResults = data.organic_results || [];
+    const cleanDomain = this.extractDomain(options.domain);
+    const searchInfo = data.search_information || {};
+    const searchMetadata = data.search_metadata || {};
+
+    let position: number | null = null;
+    let url = '';
+    let title = '';
+    let description = '';
+    let foundMatch = false;
+
+    logger.debug(`Parsing ${organicResults.length} organic results for domain: ${cleanDomain}`, {
+      totalResults: searchInfo.total_results,
+      searchTime: searchInfo.time_taken_displayed,
+      queryDisplayed: searchInfo.query_displayed
+    });
+
+    // Enhanced domain matching with multiple passes for accuracy
+    const domainVariations = this.getDomainVariations(cleanDomain);
+    
+    for (let i = 0; i < organicResults.length; i++) {
+      const result = organicResults[i];
+      if (result.link) {
+        const resultDomain = this.extractDomain(result.link);
+
+        // Check exact domain match first
+        if (this.domainsMatch(resultDomain, cleanDomain)) {
+          position = result.position || (i + 1);
+          url = result.link;
+          title = result.title || '';
+          description = result.snippet || 
+                       result.rich_snippet?.top?.detected_extensions?.description || 
+                       result.rich_snippet?.bottom?.detected_extensions?.description || '';
+          foundMatch = true;
+          
+          logger.debug(`✅ Exact domain match found at position ${position}:`, {
+            domain: resultDomain,
+            url: result.link,
+            title: result.title?.substring(0, 100)
+          });
+          break;
+        }
+      }
+    }
+
+    // If no exact match found, try fuzzy matching
+    if (!foundMatch && domainVariations.length > 1) {
+      for (let i = 0; i < organicResults.length; i++) {
+        const result = organicResults[i];
+        if (result.link) {
+          const resultDomain = this.extractDomain(result.link);
+          
+          for (const variation of domainVariations) {
+            if (this.domainsMatch(resultDomain, variation)) {
+              position = result.position || (i + 1);
+              url = result.link;
+              title = result.title || '';
+              description = result.snippet || result.rich_snippet?.top?.detected_extensions?.description || '';
+              foundMatch = true;
+              
+              logger.debug(`✅ Fuzzy domain match found at position ${position}:`, {
+                searchedFor: cleanDomain,
+                foundDomain: resultDomain,
+                variation: variation
+              });
+              break;
+            }
+          }
+          if (foundMatch) break;
+        }
+      }
+    }
+
+    if (!foundMatch) {
+      logger.debug(`❌ Domain ${cleanDomain} not found in top ${organicResults.length} results`, {
+        searchedVariations: domainVariations,
+        availableDomains: organicResults.slice(0, 10).map((r: any) => 
+          r.link ? this.extractDomain(r.link) : 'no-link'
+        )
+      });
+    }
+
+    // Parse total results more accurately
+    const totalResults = this.parseTotalResults(searchInfo.total_results);
+    
+    const result: ISearchResult = {
+      keyword: keyword.trim(),
+      domain: options.domain,
+      position,
+      url,
+      title,
+      description,
+      country: options.country.toUpperCase(),
+      city: options.city?.trim() || '',
+      state: options.state?.trim() || '',
+      postalCode: options.postalCode?.trim() || '',
+      totalResults,
+      searchedResults: organicResults.length,
+      timestamp: new Date(),
+      found: foundMatch,
+      // Additional metadata for debugging and analytics
+      searchMetadata: {
+        searchTime: searchInfo.time_taken_displayed,
+        searchId: searchMetadata.id,
+        location: searchMetadata.google_domain,
+        device: options.device || 'desktop'
+      }
+    };
+
+    logger.info(`🔍 Keyword "${keyword}" analysis complete:`, {
+      domain: cleanDomain,
+      position: position || 'Not Found',
+      totalResults: totalResults.toLocaleString(),
+      searchedResults: organicResults.length,
+      found: foundMatch
+    });
+
+    return result;
+  }
+
+  // Get domain variations for better matching accuracy
+  private getDomainVariations(domain: string): string[] {
+    const variations = new Set([domain]);
+    
+    // Add www variation
+    if (!domain.startsWith('www.')) {
+      variations.add(`www.${domain}`);
+    } else {
+      variations.add(domain.replace('www.', ''));
+    }
+    
+    // Add mobile variations
+    variations.add(domain.replace('www.', 'm.'));
+    variations.add(`m.${domain.replace('www.', '')}`);
+    variations.add(`mobile.${domain.replace('www.', '')}`);
+    
+    return Array.from(variations);
+  }
+
+  // Enhanced total results parsing
+  private parseTotalResults(totalResultsString: string): number {
+    if (!totalResultsString) return 0;
+    
+    try {
+      // Handle different formats: "About 1,234,567 results", "1.23M results", etc.
+      const cleanString = totalResultsString.toLowerCase().replace(/[^\d.,kmb]/g, '');
+      
+      if (cleanString.includes('k')) {
+        return Math.round(parseFloat(cleanString.replace('k', '')) * 1000);
+      } else if (cleanString.includes('m')) {
+        return Math.round(parseFloat(cleanString.replace('m', '')) * 1000000);
+      } else if (cleanString.includes('b')) {
+        return Math.round(parseFloat(cleanString.replace('b', '')) * 1000000000);
+      } else {
+        return parseInt(cleanString.replace(/[^\d]/g, '')) || 0;
+      }
+    } catch (error) {
+      logger.warn('Failed to parse total results:', totalResultsString);
+      return 0;
+    }
+  }
+
+  private extractDomain(url: string): string {
+    try {
+      let domain = url.replace(/^https?:\/\//, '');
+      domain = domain.replace(/^www\./, '');
+      domain = domain.split('/')[0].split('?')[0].split('#')[0];
+      return domain.toLowerCase().trim();
+    } catch (error) {
+      logger.warn(`Error extracting domain from ${url}:`, error);
+      return url.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0].toLowerCase().trim();
+    }
+  }
+
+  private domainsMatch(domain1: string, domain2: string): boolean {
+    if (!domain1 || !domain2) return false;
+    
+    const d1 = domain1.toLowerCase().trim();
+    const d2 = domain2.toLowerCase().trim();
+    
+    // Exact match
+    if (d1 === d2) return true;
+    
+    // Remove common prefixes for comparison
+    const normalize = (d: string) => d.replace(/^(www|m|mobile)\./, '').replace(/\/$/, '');
+    const n1 = normalize(d1);
+    const n2 = normalize(d2);
+    
+    if (n1 === n2) return true;
+    
+    // Check if one is subdomain of another
+    return d1.includes(d2) || d2.includes(d1) || 
+           d1.endsWith(`.${d2}`) || d2.endsWith(`.${d1}`);
+  }
+
+  private async updateKeyUsage(keyId: string, success: boolean): Promise<void> {
+    const keyConfig = this.apiKeys.find(k => k.id === keyId);
+    if (!keyConfig) return;
+
+    const previousUsage = keyConfig.usedToday;
+    const previousSuccessRate = keyConfig.successRate;
+
+    if (success) {
+      keyConfig.usedToday++;
+      keyConfig.usedThisMonth++;
+      keyConfig.successRate = Math.min(100, (keyConfig.successRate * 0.95) + (100 * 0.05));
+      
+      // Check monthly limit first (SerpAPI resets monthly, not daily for free tier)
+      if (keyConfig.usedThisMonth >= keyConfig.monthlyLimit) {
+        keyConfig.status = 'exhausted';
+        logger.warn(`🔴 API Key ${keyId} MONTHLY EXHAUSTED: ${keyConfig.usedThisMonth}/${keyConfig.monthlyLimit} (100%) - Will reset next month`);
+      }
+    } else {
+      keyConfig.errorCount++;
+      keyConfig.successRate = Math.max(0, (keyConfig.successRate * 0.95));
+    }
+
+    keyConfig.lastUsed = new Date();
+    keyConfig.updatedAt = new Date();
+
+    // Enhanced status tracking with warnings
+    const usagePercent = (keyConfig.usedToday / keyConfig.dailyLimit) * 100;
+    
+    if (keyConfig.usedToday >= keyConfig.dailyLimit) {
+      keyConfig.status = 'exhausted';
+      logger.warn(`🔴 API Key ${keyId} EXHAUSTED: ${keyConfig.usedToday}/${keyConfig.dailyLimit} (100%)`);
+    } else if (usagePercent >= 90) {
+      logger.warn(`🟡 API Key ${keyId} near limit: ${keyConfig.usedToday}/${keyConfig.dailyLimit} (${Math.round(usagePercent)}%)`);
+    } else if (usagePercent >= 75) {
+      logger.info(`🟠 API Key ${keyId} high usage: ${keyConfig.usedToday}/${keyConfig.dailyLimit} (${Math.round(usagePercent)}%)`);
+    }
+
+    // Log significant success rate drops
+    if (previousSuccessRate - keyConfig.successRate > 5) {
+      logger.warn(`📉 API Key ${keyId} success rate dropped: ${Math.round(previousSuccessRate)}% → ${Math.round(keyConfig.successRate)}%`);
+    }
+
+    // Update in database asynchronously with retry logic
+    setImmediate(async () => {
+      let retryCount = 0;
+      const maxRetries = 3;
+      
+      while (retryCount < maxRetries) {
+        try {
+          await ApiKeyModel.findOneAndUpdate(
+            { keyId },
+            {
+              usedToday: keyConfig.usedToday,
+              usedThisMonth: keyConfig.usedThisMonth,
+              status: keyConfig.status,
+              errorCount: keyConfig.errorCount,
+              successRate: Math.round(keyConfig.successRate * 100) / 100,
+              lastUsed: keyConfig.lastUsed,
+              updatedAt: keyConfig.updatedAt,
+              // Add usage tracking metadata
+              usageHistory: {
+                lastUpdate: new Date(),
+                dailyUsagePercent: Math.round(usagePercent * 100) / 100,
+                trend: keyConfig.usedToday > previousUsage ? 'increasing' : 'stable'
+              }
+            },
+            { 
+              upsert: true,
+              runValidators: true
+            }
+          );
+          break; // Success, exit retry loop
+        } catch (error) {
+          retryCount++;
+          logger.error(`Failed to update key usage in database (attempt ${retryCount}/${maxRetries}):`, error);
+          
+          if (retryCount < maxRetries) {
+            // Wait before retry
+            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+          }
+        }
+      }
+    });
+  }
+
+  private async markKeyExhausted(keyId: string): Promise<void> {
+    const keyConfig = this.apiKeys.find(k => k.id === keyId);
+    if (keyConfig && keyConfig.status !== 'exhausted') {
+      keyConfig.status = 'exhausted';
+      await this.updateKeyUsage(keyId, false);
+    }
+  }
+
+  private async pauseKey(keyId: string, duration: number): Promise<void> {
+    const keyConfig = this.apiKeys.find(k => k.id === keyId);
+    if (keyConfig) {
+      const previousStatus = keyConfig.status;
+      keyConfig.status = 'paused';
+      
+      setTimeout(() => {
+        if (keyConfig.status === 'paused') {
+          keyConfig.status = previousStatus === 'exhausted' ? 'exhausted' : 'active';
+        }
+      }, duration);
+    }
+  }
+
+  private async saveSearchResult(result: ISearchResult): Promise<void> {
+    try {
+      await SearchResultModel.create(result);
+    } catch (error) {
+      logger.error('Failed to save search result to database:', error);
+    }
+  }
+
+  private isQuotaExceeded(error: any): boolean {
+    const message = error?.message?.toLowerCase() || '';
+    return message.includes('quota') || 
+           message.includes('limit') || 
+           message.includes('exceeded') ||
+           message.includes('usage limit') ||
+           message.includes('monthly searches used') ||
+           message.includes('daily searches used');
+  }
+
+  private isRateLimited(error: any): boolean {
+    const message = error?.message?.toLowerCase() || '';
+    return message.includes('rate') || 
+           message.includes('too many') || 
+           message.includes('429') ||
+           message.includes('requests per second');
+  }
+
+  public getKeyStats(): { 
+    total: number; 
+    active: number; 
+    exhausted: number; 
+    paused: number; 
+    totalUsageToday: number; 
+    totalCapacity: number;
+    hasEnvironmentKeys: boolean;
+    usagePercentage: number;
+    remainingCapacity: number;
+    estimatedTimeToExhaustion?: string;
+    criticalKeys: number;
+    warningKeys: number;
+    totalUsageThisMonth: number;
+    totalMonthlyCapacity: number;
+    monthlyUsagePercentage: number;
+  } {
+    const totalUsageToday = this.apiKeys.reduce((sum, k) => sum + k.usedToday, 0);
+    const totalCapacity = this.apiKeys.reduce((sum, k) => sum + k.dailyLimit, 0);
+    const remainingCapacity = totalCapacity - totalUsageToday;
+    const usagePercentage = totalCapacity > 0 ? Math.round((totalUsageToday / totalCapacity) * 100) : 0;
+    
+    // Count keys in different warning states
+    const criticalKeys = this.apiKeys.filter(k => 
+      (k.usedToday / k.dailyLimit) >= 0.9 && k.status === 'active'
+    ).length;
+    
+    const warningKeys = this.apiKeys.filter(k => 
+      (k.usedToday / k.dailyLimit) >= 0.75 && (k.usedToday / k.dailyLimit) < 0.9 && k.status === 'active'
+    ).length;
+
+    // Estimate time to exhaustion based on current usage pattern
+    let estimatedTimeToExhaustion: string | undefined;
+    if (remainingCapacity > 0 && totalUsageToday > 0) {
+      const hoursElapsed = new Date().getHours() + (new Date().getMinutes() / 60);
+      if (hoursElapsed > 0) {
+        const currentRate = totalUsageToday / hoursElapsed; // requests per hour
+        const hoursToExhaustion = remainingCapacity / currentRate;
+        
+        if (hoursToExhaustion < 24) {
+          estimatedTimeToExhaustion = hoursToExhaustion < 1 
+            ? `${Math.round(hoursToExhaustion * 60)} minutes`
+            : `${Math.round(hoursToExhaustion)} hours`;
+        }
+      }
+    }
+
+    return {
+      total: this.apiKeys.length,
+      active: this.apiKeys.filter(k => k.status === 'active' && k.usedThisMonth < k.monthlyLimit).length,
+      exhausted: this.apiKeys.filter(k => k.status === 'exhausted' || k.usedThisMonth >= k.monthlyLimit).length,
+      paused: this.apiKeys.filter(k => k.status === 'paused').length,
+      totalUsageToday,
+      totalCapacity,
+      hasEnvironmentKeys: this.apiKeys.length > 0,
+      usagePercentage,
+      remainingCapacity,
+      estimatedTimeToExhaustion,
+      criticalKeys,
+      warningKeys,
+      // Add monthly usage tracking
+      totalUsageThisMonth: this.apiKeys.reduce((sum, k) => sum + k.usedThisMonth, 0),
+      totalMonthlyCapacity: this.apiKeys.reduce((sum, k) => sum + k.monthlyLimit, 0),
+      monthlyUsagePercentage: totalCapacity > 0 ? Math.round((this.apiKeys.reduce((sum, k) => sum + k.usedThisMonth, 0) / this.apiKeys.reduce((sum, k) => sum + k.monthlyLimit, 0)) * 100) : 0
+    };
+  }
+
+  public getDetailedKeyStats() {
+    return this.apiKeys.map(key => {
+      const usagePercentage = Math.round((key.usedToday / key.dailyLimit) * 100);
+      const remainingRequests = key.dailyLimit - key.usedToday;
+      
+      // Determine health status
+      let healthStatus: 'healthy' | 'warning' | 'critical' | 'exhausted';
+      if (key.status === 'exhausted') {
+        healthStatus = 'exhausted';
+      } else if (usagePercentage >= 90) {
+        healthStatus = 'critical';
+      } else if (usagePercentage >= 75) {
+        healthStatus = 'warning';
+      } else {
+        healthStatus = 'healthy';
+      }
+
+      return {
+        id: key.id,
+        status: key.status,
+        usedToday: key.usedToday,
+        dailyLimit: key.dailyLimit,
+        usagePercentage,
+        remainingRequests,
+        successRate: Math.round(key.successRate * 100) / 100,
+        errorCount: key.errorCount,
+        lastUsed: key.lastUsed,
+        priority: key.priority,
+        healthStatus,
+        usedThisMonth: key.usedThisMonth,
+        monthlyLimit: key.monthlyLimit,
+        monthlyUsagePercentage: Math.round((key.usedThisMonth / key.monthlyLimit) * 100),
+        estimatedDailyExhaustion: remainingRequests > 0 && key.usedToday > 0 
+          ? this.estimateExhaustionTime(key) 
+          : null
+      };
+    });
+  }
+
+  private estimateExhaustionTime(key: ISerpApiKey): string | null {
+    const hoursElapsed = new Date().getHours() + (new Date().getMinutes() / 60);
+    if (hoursElapsed === 0) return null;
+    
+    const currentRate = key.usedToday / hoursElapsed;
+    const remainingRequests = key.dailyLimit - key.usedToday;
+    
+    if (currentRate <= 0) return null;
+    
+    const hoursToExhaustion = remainingRequests / currentRate;
+    
+    if (hoursToExhaustion < 1) {
+      return `${Math.round(hoursToExhaustion * 60)} minutes`;
+    } else if (hoursToExhaustion < 24) {
+      return `${Math.round(hoursToExhaustion)} hours`;
+    } else {
+      return 'Tomorrow or later';
+    }
+  }
+
+  public async resetDailyUsage(): Promise<void> {
+    logger.info('🔄 Starting daily usage reset...');
+    
+    for (const key of this.apiKeys) {
+      key.usedToday = 0;
+      if (key.status === 'exhausted') {
+        key.status = 'active';
+      }
+      key.errorCount = 0;
+    }
+
+    try {
+      await ApiKeyModel.updateMany({}, {
+        usedToday: 0,
+        status: 'active',
+        errorCount: 0
+      });
+      
+      logger.info(`✅ Daily usage reset completed for ${this.apiKeys.length} API keys`);
+    } catch (error) {
+      logger.error('❌ Failed to reset daily usage in database:', error);
+    }
+  }
+
+  public async resetMonthlyUsage(): Promise<void> {
+    logger.info('🔄 Starting monthly usage reset (SerpAPI monthly limit refresh)...');
+    
+    for (const key of this.apiKeys) {
+      const previousUsage = key.usedThisMonth;
+      key.usedThisMonth = 0;
+      key.usedToday = 0;
+      if (key.status === 'exhausted') {
+        key.status = 'active';
+        logger.info(`✅ API Key ${key.id} reactivated - Monthly limit refreshed (was ${previousUsage}/${key.monthlyLimit})`);
+      }
+      key.errorCount = 0;
+      key.successRate = 100;
+    }
+
+    try {
+      await ApiKeyModel.updateMany({}, {
+        usedToday: 0,
+        usedThisMonth: 0,
+        status: 'active',
+        errorCount: 0,
+        successRate: 100
+      });
+      
+      logger.info(`✅ Monthly usage reset completed for ${this.apiKeys.length} API keys - All limits refreshed`);
+    } catch (error) {
+      logger.error('❌ Failed to reset monthly usage in database:', error);
+    }
+  }
+
+  // Check if it's a new month and reset if needed
+  public async checkAndResetMonthlyUsage(): Promise<void> {
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+    
+    // Check if any key has lastUsed in a different month
+    for (const key of this.apiKeys) {
+      if (key.lastUsed) {
+        const lastUsedMonth = key.lastUsed.getMonth();
+        const lastUsedYear = key.lastUsed.getFullYear();
+        
+        if (lastUsedYear < currentYear || (lastUsedYear === currentYear && lastUsedMonth < currentMonth)) {
+          logger.info(`🗓️ New month detected for key ${key.id} - Resetting monthly usage`);
+          await this.resetMonthlyUsage();
+          break; // Only need to reset once
+        }
+      }
+    }
+  }
+
+  // Test user provided API key
+  public async testUserApiKey(apiKey: string): Promise<{ valid: boolean; message: string; details?: any }> {
+    try {
+      const testResult = await this.makeRequest({
+        id: 'test-key',
+        key: apiKey,
+        dailyLimit: 1000,
+        monthlyLimit: 10000,
+        usedToday: 0,
+        usedThisMonth: 0,
+        status: 'active',
+        priority: 1,
+        lastUsed: new Date(),
+        errorCount: 0,
+        successRate: 100,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      }, 'test', { domain: 'google.com', country: 'US' });
+
+      return {
+        valid: true,
+        message: 'API key is valid and working',
+        details: {
+          totalResults: testResult.totalResults,
+          searchedResults: testResult.searchedResults
+        }
+      };
+    } catch (error) {
+      const errorMessage = (error as Error).message;
+      
+      if (this.isQuotaExceeded(error)) {
+        return {
+          valid: false,
+          message: 'API key has reached its quota limit'
+        };
+      } else if (this.isRateLimited(error)) {
+        return {
+          valid: false,
+          message: 'API key is being rate limited'
+        };
+      } else if (errorMessage.includes('401') || errorMessage.includes('unauthorized')) {
+        return {
+          valid: false,
+          message: 'Invalid API key'
+        };
+      } else {
+        return {
+          valid: false,
+          message: `API key test failed: ${errorMessage}`
+        };
+      }
+    }
+  }
+}

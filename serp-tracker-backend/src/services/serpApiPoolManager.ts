@@ -29,6 +29,7 @@ export class SerpApiPoolManager {
     }
 
     await this.loadApiKeys();
+    await this.checkAndResetMonthlyUsage();
     this.rotationStrategy = (process.env.SERPAPI_ROTATION_STRATEGY as any) || 'priority';
     this.isInitialized = true;
     
@@ -47,7 +48,12 @@ export class SerpApiPoolManager {
     // Load keys from environment variables (SERPAPI_KEY_1, SERPAPI_KEY_2, etc.)
     while (process.env[`SERPAPI_KEY_${keyIndex}`] || keyIndex === 1) {
       const key = process.env[`SERPAPI_KEY_${keyIndex}`] || (process.env.SERPAPI_KEY || '').trim();
-      if (key && key.length > 10 && key !== 'your_serpapi_key_here') { // Better validation
+      // Skip placeholder values
+      if (key && key.length > 10 && 
+          key !== 'your_serpapi_key_here' && 
+          !key.includes('your_second_serpapi_key_here') &&
+          !key.includes('your_third_serpapi_key_here') &&
+          !key.includes('CHANGE_ME')) { // Better validation
         keys.push({
           id: `serpapi_${keyIndex}`,
           key,
@@ -60,6 +66,7 @@ export class SerpApiPoolManager {
           lastUsed: new Date(),
           errorCount: 0,
           successRate: 100,
+          monthlyResetAt: new Date(),
           createdAt: new Date(),
           updatedAt: new Date()
         });
@@ -95,7 +102,8 @@ export class SerpApiPoolManager {
             status: 'active',
             priority: keyConfig.priority,
             errorCount: 0,
-            successRate: 100
+            successRate: 100,
+            monthlyResetAt: new Date()
           });
         }
       } catch (error) {
@@ -244,7 +252,7 @@ export class SerpApiPoolManager {
       api_key: keyConfig.key,
       gl: options.country.toLowerCase(),
       hl: options.language || 'en',
-      num: '150', // Get more results for better accuracy
+      num: '200', // Search through 200 results (20 pages)
       device: options.device || 'desktop',
       safe: 'off',
       filter: '0', // Include duplicate results
@@ -362,11 +370,24 @@ export class SerpApiPoolManager {
       city: options.city?.trim() || '',
       state: options.state?.trim() || '',
       postalCode: options.postalCode?.trim() || '',
-      totalResults: parseInt(searchInfo.total_results?.replace(/[^\d]/g, '') || '0') || 0,
+      totalResults: this.parseTotalResults(searchInfo.total_results),
       searchedResults: organicResults.length,
       timestamp: new Date(),
       found: foundMatch
     };
+  }
+
+  private parseTotalResults(totalResults: any): number {
+    if (typeof totalResults === 'number') {
+      return totalResults;
+    }
+    
+    if (typeof totalResults === 'string') {
+      // Remove non-digit characters and parse
+      return parseInt(totalResults.replace(/[^\d]/g, '') || '0') || 0;
+    }
+    
+    return 0;
   }
 
   private extractDomain(url: string): string {
@@ -514,29 +535,132 @@ export class SerpApiPoolManager {
            message.includes('requests per second');
   }
 
-  public getKeyStats(): { total: number; active: number; exhausted: number; paused: number; totalUsageToday: number; totalCapacity: number } {
+  public getKeyStats(): { 
+    total: number; 
+    active: number; 
+    exhausted: number; 
+    paused: number; 
+    totalUsageToday: number; 
+    totalCapacity: number;
+    hasEnvironmentKeys: boolean;
+    usagePercentage: number;
+    remainingCapacity: number;
+    estimatedTimeToExhaustion?: string;
+    criticalKeys: number;
+    warningKeys: number;
+    totalUsageThisMonth: number;
+    totalMonthlyCapacity: number;
+    monthlyUsagePercentage: number;
+  } {
+    const totalUsageToday = this.apiKeys.reduce((sum, k) => sum + k.usedToday, 0);
+    const totalCapacity = this.apiKeys.reduce((sum, k) => sum + k.dailyLimit, 0);
+    const remainingCapacity = totalCapacity - totalUsageToday;
+    const usagePercentage = totalCapacity > 0 ? Math.round((totalUsageToday / totalCapacity) * 100) : 0;
+    
+    // Count keys in different warning states
+    const criticalKeys = this.apiKeys.filter(k => 
+      (k.usedToday / k.dailyLimit) >= 0.9 && k.status === 'active'
+    ).length;
+    
+    const warningKeys = this.apiKeys.filter(k => 
+      (k.usedToday / k.dailyLimit) >= 0.75 && (k.usedToday / k.dailyLimit) < 0.9 && k.status === 'active'
+    ).length;
+
+    // Estimate time to exhaustion based on current usage pattern
+    let estimatedTimeToExhaustion: string | undefined;
+    if (remainingCapacity > 0 && totalUsageToday > 0) {
+      const hoursElapsed = new Date().getHours() + (new Date().getMinutes() / 60);
+      if (hoursElapsed > 0) {
+        const currentRate = totalUsageToday / hoursElapsed; // requests per hour
+        const hoursToExhaustion = remainingCapacity / currentRate;
+        
+        if (hoursToExhaustion < 24) {
+          estimatedTimeToExhaustion = hoursToExhaustion < 1 
+            ? `${Math.round(hoursToExhaustion * 60)} minutes`
+            : `${Math.round(hoursToExhaustion)} hours`;
+        }
+      }
+    }
+
     return {
       total: this.apiKeys.length,
-      active: this.apiKeys.filter(k => k.status === 'active').length,
-      exhausted: this.apiKeys.filter(k => k.status === 'exhausted').length,
+      active: this.apiKeys.filter(k => k.status === 'active' && k.usedThisMonth < k.monthlyLimit).length,
+      exhausted: this.apiKeys.filter(k => k.status === 'exhausted' || k.usedThisMonth >= k.monthlyLimit).length,
       paused: this.apiKeys.filter(k => k.status === 'paused').length,
-      totalUsageToday: this.apiKeys.reduce((sum, k) => sum + k.usedToday, 0),
-      totalCapacity: this.apiKeys.reduce((sum, k) => sum + k.dailyLimit, 0)
+      totalUsageToday,
+      totalCapacity,
+      hasEnvironmentKeys: this.apiKeys.length > 0,
+      usagePercentage,
+      remainingCapacity,
+      estimatedTimeToExhaustion,
+      criticalKeys,
+      warningKeys,
+      // Add monthly usage tracking
+      totalUsageThisMonth: this.apiKeys.reduce((sum, k) => sum + k.usedThisMonth, 0),
+      totalMonthlyCapacity: this.apiKeys.reduce((sum, k) => sum + k.monthlyLimit, 0),
+      monthlyUsagePercentage: totalCapacity > 0 ? Math.round((this.apiKeys.reduce((sum, k) => sum + k.usedThisMonth, 0) / this.apiKeys.reduce((sum, k) => sum + k.monthlyLimit, 0)) * 100) : 0
     };
   }
 
   public getDetailedKeyStats() {
-    return this.apiKeys.map(key => ({
-      id: key.id,
-      status: key.status,
-      usedToday: key.usedToday,
-      dailyLimit: key.dailyLimit,
-      usagePercentage: Math.round((key.usedToday / key.dailyLimit) * 100),
-      successRate: Math.round(key.successRate * 100) / 100,
-      errorCount: key.errorCount,
-      lastUsed: key.lastUsed,
-      priority: key.priority
-    }));
+    return this.apiKeys.map(key => {
+      const usagePercentage = Math.round((key.usedToday / key.dailyLimit) * 100);
+      const remainingRequests = key.dailyLimit - key.usedToday;
+      
+      // Determine health status
+      let healthStatus: 'healthy' | 'warning' | 'critical' | 'exhausted';
+      if (key.status === 'exhausted') {
+        healthStatus = 'exhausted';
+      } else if (usagePercentage >= 90) {
+        healthStatus = 'critical';
+      } else if (usagePercentage >= 75) {
+        healthStatus = 'warning';
+      } else {
+        healthStatus = 'healthy';
+      }
+
+      // Calculate monthly usage percentage
+      const monthlyUsagePercentage = Math.round((key.usedThisMonth / key.monthlyLimit) * 100);
+
+      return {
+        id: key.id,
+        status: key.status,
+        usedToday: key.usedToday,
+        dailyLimit: key.dailyLimit,
+        usagePercentage,
+        remainingRequests,
+        successRate: key.successRate,
+        errorCount: key.errorCount,
+        lastUsed: key.lastUsed?.toISOString() || new Date().toISOString(),
+        priority: key.priority,
+        healthStatus,
+        usedThisMonth: key.usedThisMonth,
+        monthlyLimit: key.monthlyLimit,
+        monthlyUsagePercentage,
+        estimatedDailyExhaustion: this.estimateExhaustionTime(key)
+      };
+    });
+  }
+
+  private estimateExhaustionTime(key: ISerpApiKey): string | null {
+    const remainingRequests = key.dailyLimit - key.usedToday;
+    if (remainingRequests <= 0 || key.usedToday === 0) {
+      return null;
+    }
+
+    const hoursElapsed = new Date().getHours() + (new Date().getMinutes() / 60);
+    if (hoursElapsed === 0) return null;
+
+    const currentRate = key.usedToday / hoursElapsed; // requests per hour
+    const hoursToExhaustion = remainingRequests / currentRate;
+    
+    if (hoursToExhaustion < 1) {
+      return `${Math.round(hoursToExhaustion * 60)} minutes`;
+    } else if (hoursToExhaustion < 24) {
+      return `${Math.round(hoursToExhaustion)} hours`;
+    } else {
+      return null; // More than a day
+    }
   }
 
   public async resetDailyUsage(): Promise<void> {
@@ -566,6 +690,67 @@ export class SerpApiPoolManager {
     }
   }
 
+  public async resetMonthlyUsage(): Promise<void> {
+    logger.info('🔄 Starting monthly usage reset (SerpAPI monthly limit refresh)...');
+    
+    for (const key of this.apiKeys) {
+      if (key.usedThisMonth > 0 || key.status === 'exhausted') {
+        key.usedThisMonth = 0;
+        if (key.status === 'exhausted' && key.usedToday < key.dailyLimit) {
+          key.status = 'active';
+        }
+        key.errorCount = 0; // Reset monthly errors
+        logger.debug(`Reset monthly usage for key ${key.id}`);
+      }
+    }
+
+    try {
+      // Reset in database
+      await ApiKeyModel.updateMany({}, {
+        usedThisMonth: 0,
+        $set: {
+          monthlyResetAt: new Date()
+        }
+      });
+      
+      logger.info(`✅ Monthly usage reset completed for ${this.apiKeys.length} API keys`);
+    } catch (error) {
+      logger.error('❌ Failed to reset monthly usage in database:', error);
+    }
+  }
+
+  // Check if monthly reset is needed and perform it
+  public async checkAndResetMonthlyUsage(): Promise<void> {
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+    
+    // Check each key to see if it needs monthly reset
+    for (const key of this.apiKeys) {
+      try {
+        const existingKey = await ApiKeyModel.findOne({ keyId: key.id });
+        if (existingKey && existingKey.monthlyResetAt) {
+          const lastReset = new Date(existingKey.monthlyResetAt);
+          const lastResetMonth = lastReset.getMonth();
+          const lastResetYear = lastReset.getFullYear();
+          
+          // If we're in a new month, reset the usage
+          if (currentMonth !== lastResetMonth || currentYear !== lastResetYear) {
+            logger.info(`🗓️ Monthly reset needed for key ${key.id} (last reset: ${lastReset.toISOString()})`);
+            await this.resetMonthlyUsage();
+            break; // Reset all keys at once
+          }
+        } else {
+          // No reset record found, perform initial monthly reset
+          await this.resetMonthlyUsage();
+          break;
+        }
+      } catch (error) {
+        logger.warn(`Failed to check monthly reset for key ${key.id}:`, error);
+      }
+    }
+  }
+
   public async testAllKeys(): Promise<void> {
     logger.info('🧪 Testing all API keys...');
     
@@ -582,5 +767,235 @@ export class SerpApiPoolManager {
         key.status = 'error';
       }
     }
+  }
+
+  public async testUserApiKey(apiKey: string): Promise<{ valid: boolean; message: string; details?: any }> {
+    try {
+      logger.info(`🧪 Testing user-provided API key...`);
+      
+      // Create a temporary key object for testing
+      const tempKey: ISerpApiKey = {
+        id: 'temp_user_key',
+        key: apiKey.trim(),
+        dailyLimit: 250,
+        monthlyLimit: 250,
+        usedToday: 0,
+        usedThisMonth: 0,
+        status: 'active',
+        priority: 999,
+        lastUsed: new Date(),
+        errorCount: 0,
+        successRate: 100,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+
+      // Make a test request using the provided API key
+      const result = await this.makeRequest(tempKey, 'test query', {
+        domain: 'example.com',
+        country: 'US'
+      });
+
+      logger.info(`✅ User API key test successful`);
+      return {
+        valid: true,
+        message: 'API key is valid and working',
+        details: {
+          totalResults: result.totalResults || 0,
+          responseTime: Date.now(),
+          testKeyword: 'test query',
+          testDomain: 'example.com'
+        }
+      };
+
+    } catch (error) {
+      const errorMessage = (error as Error).message;
+      logger.error(`❌ User API key test failed: ${errorMessage}`);
+      
+      // Check for specific error types to provide better feedback
+      if (this.isQuotaExceeded(error)) {
+        return {
+          valid: false,
+          message: 'API key has reached its quota limit',
+          details: { error: 'quota_exceeded', errorMessage }
+        };
+      } else if (this.isRateLimited(error)) {
+        return {
+          valid: false,
+          message: 'API key is being rate limited',
+          details: { error: 'rate_limited', errorMessage }
+        };
+      } else if (errorMessage.includes('401') || errorMessage.includes('unauthorized')) {
+        return {
+          valid: false,
+          message: 'Invalid API key',
+          details: { error: 'unauthorized', errorMessage }
+        };
+      } else {
+        return {
+          valid: false,
+          message: `API key test failed: ${errorMessage}`,
+          details: {
+            error: errorMessage,
+            testKeyword: 'test query',
+            testDomain: 'example.com'
+          }
+        };
+      }
+    }
+  }
+
+  // Dynamic API Key Management Methods
+
+  public async addApiKey(apiKey: string, dailyLimit?: number, monthlyLimit?: number): Promise<{ success: boolean; message: string; keyId?: string }> {
+    try {
+      // First test if the API key is valid
+      const testResult = await this.testUserApiKey(apiKey);
+      if (!testResult.valid) {
+        return {
+          success: false,
+          message: `Invalid API key: ${testResult.message}`
+        };
+      }
+
+      // Check if key already exists
+      const existingKey = this.apiKeys.find(k => k.key === apiKey);
+      if (existingKey) {
+        return {
+          success: false,
+          message: 'API key already exists in the pool'
+        };
+      }
+
+      // Generate unique ID
+      const keyId = `user_serpapi_${Date.now()}`;
+      
+      // Create new key configuration
+      const newKey: ISerpApiKey = {
+        id: keyId,
+        key: apiKey,
+        dailyLimit: dailyLimit || 250, // SerpAPI free tier default
+        monthlyLimit: monthlyLimit || 250, // SerpAPI free tier default
+        usedToday: 0,
+        usedThisMonth: 0,
+        status: 'active',
+        priority: this.apiKeys.length + 1,
+        lastUsed: new Date(),
+        errorCount: 0,
+        successRate: 100,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        monthlyResetAt: new Date()
+      };
+
+      // Add to memory pool
+      this.apiKeys.push(newKey);
+
+      // Save to database
+      await ApiKeyModel.create({
+        keyId: newKey.id,
+        dailyLimit: newKey.dailyLimit,
+        monthlyLimit: newKey.monthlyLimit,
+        usedToday: 0,
+        usedThisMonth: 0,
+        status: 'active',
+        priority: newKey.priority,
+        errorCount: 0,
+        successRate: 100,
+        monthlyResetAt: new Date()
+      });
+
+      logger.info(`✅ Successfully added new API key: ${keyId}`);
+      return {
+        success: true,
+        message: 'API key added successfully',
+        keyId: keyId
+      };
+
+    } catch (error) {
+      logger.error('❌ Failed to add API key:', error);
+      return {
+        success: false,
+        message: `Failed to add API key: ${(error as Error).message}`
+      };
+    }
+  }
+
+  public async removeApiKey(keyId: string): Promise<{ success: boolean; message: string }> {
+    try {
+      // Find the key in memory
+      const keyIndex = this.apiKeys.findIndex(k => k.id === keyId);
+      if (keyIndex === -1) {
+        return {
+          success: false,
+          message: 'API key not found'
+        };
+      }
+
+      // Remove from memory
+      this.apiKeys.splice(keyIndex, 1);
+
+      // Remove from database
+      await ApiKeyModel.deleteOne({ keyId: keyId });
+
+      logger.info(`✅ Successfully removed API key: ${keyId}`);
+      return {
+        success: true,
+        message: 'API key removed successfully'
+      };
+
+    } catch (error) {
+      logger.error('❌ Failed to remove API key:', error);
+      return {
+        success: false,
+        message: `Failed to remove API key: ${(error as Error).message}`
+      };
+    }
+  }
+
+  public async updateApiKey(keyId: string, updates: Partial<{ dailyLimit: number; monthlyLimit: number; priority: number }>): Promise<{ success: boolean; message: string }> {
+    try {
+      // Find the key in memory
+      const key = this.apiKeys.find(k => k.id === keyId);
+      if (!key) {
+        return {
+          success: false,
+          message: 'API key not found'
+        };
+      }
+
+      // Update memory
+      if (updates.dailyLimit !== undefined) key.dailyLimit = updates.dailyLimit;
+      if (updates.monthlyLimit !== undefined) key.monthlyLimit = updates.monthlyLimit;
+      if (updates.priority !== undefined) key.priority = updates.priority;
+      key.updatedAt = new Date();
+
+      // Update database
+      const updateData: any = { updatedAt: new Date() };
+      if (updates.dailyLimit !== undefined) updateData.dailyLimit = updates.dailyLimit;
+      if (updates.monthlyLimit !== undefined) updateData.monthlyLimit = updates.monthlyLimit;
+      if (updates.priority !== undefined) updateData.priority = updates.priority;
+
+      await ApiKeyModel.updateOne({ keyId: keyId }, updateData);
+
+      logger.info(`✅ Successfully updated API key: ${keyId}`);
+      return {
+        success: true,
+        message: 'API key updated successfully'
+      };
+
+    } catch (error) {
+      logger.error('❌ Failed to update API key:', error);
+      return {
+        success: false,
+        message: `Failed to update API key: ${(error as Error).message}`
+      };
+    }
+  }
+
+  public async refreshStats(): Promise<void> {
+    // This method can be called to refresh stats after dynamic changes
+    // It's mainly for future extensibility
+    logger.debug('📊 Refreshing API pool statistics...');
   }
 }

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import type { SerpAnalysisResult } from '@/lib/types';
-import { getSerpAnalysis, checkBackendHealth } from '@/app/actions';
+import { getSerpAnalysis, checkBackendHealth, getApiKeyStats } from '@/app/actions';
 import { KeywordForm, type KeywordFormValues } from '@/components/keyword-form';
 import { ResultsDisplay } from '@/components/results-display';
 import { LoadingSkeleton } from '@/components/loading-skeleton';
@@ -120,9 +120,39 @@ export default function Home() {
       setProgress(100);
       setProgressMessage('Analysis complete!');
       
-      // Small delay to show completion
-      setTimeout(() => {
+      // Small delay to show completion, then refresh stats
+      setTimeout(async () => {
         setAnalysis(result);
+        
+        // Refresh API stats if we have real backend data - do this after setting analysis for immediate display
+        if (result.keyStats && !result.aiInsights.includes('Backend connection failed')) {
+          try {
+            // Force a fresh stats fetch with timestamp to prevent caching
+            const freshStatsUrl = `http://localhost:5000/api/keys/stats?t=${Date.now()}`;
+            const response = await fetch(freshStatsUrl, {
+              method: 'GET',
+              cache: 'no-store',
+              headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache'
+              }
+            });
+            
+            if (response.ok) {
+              const freshStatsData = await response.json();
+              if (freshStatsData.success && freshStatsData.data?.summary) {
+                // Update the analysis with fresh stats
+                setAnalysis(prev => prev ? {
+                  ...prev,
+                  keyStats: freshStatsData.data.summary
+                } : result);
+              }
+            }
+          } catch (error) {
+            console.warn('Failed to refresh API stats:', error);
+          }
+        }
         
         // Check if result contains warning about backend failure
         if (result.aiInsights.includes('Backend connection failed')) {
@@ -231,27 +261,20 @@ export default function Home() {
             </div>
           ) : (
             apiKeyPassword === API_KEY_MANAGER_PASSWORD ? (
-              <div className="relative">
-                <ApiKeyManager 
-                  onApiKeysChange={(keys) => {
-                    setApiKeys(keys);
-                    if (activeKeyIdx >= keys.length) {
-                      setActiveKeyIdx(0);
-                    }
-                  }} 
-                />
-                <Button 
-                  className="absolute top-2 right-2 bg-secondary text-secondary-foreground" 
-                  onClick={() => { 
-                    setShowApiKeyManager(false); 
-                    setApiKeyPassword(''); 
-                    setPasswordInput(''); 
-                    setPasswordError(''); 
-                  }}
-                >
-                  Hide
-                </Button>
-              </div>
+              <ApiKeyManager 
+                onApiKeysChange={(keys) => {
+                  setApiKeys(keys);
+                  if (activeKeyIdx >= keys.length) {
+                    setActiveKeyIdx(0);
+                  }
+                }} 
+                onHide={() => { 
+                  setShowApiKeyManager(false); 
+                  setApiKeyPassword(''); 
+                  setPasswordInput(''); 
+                  setPasswordError(''); 
+                }}
+              />
             ) : (
               <div className="max-w-sm mx-auto p-6 border rounded-lg bg-background shadow-lg flex flex-col gap-4">
                 <label className="block mb-2 font-semibold text-lg">Enter password to manage API keys:</label>

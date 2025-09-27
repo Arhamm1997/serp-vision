@@ -1,11 +1,13 @@
 import { Application } from 'express';
 import { searchRoutes } from './searchRoutes';
 import { healthRoutes } from './healthRoutes';
+import keyManagementRoutes from './keyManagementRoutes';
 
 export const setupRoutes = (app: Application): void => {
   // API routes
   app.use('/api/search', searchRoutes);
   app.use('/api/health', healthRoutes);
+  app.use('/api/keys', keyManagementRoutes);
 
   // Root API documentation
   app.get('/api', (req, res) => {
@@ -44,6 +46,24 @@ export const setupRoutes = (app: Application): void => {
         },
         'GET /api/health/keys': {
           description: 'Detailed API key usage statistics'
+        },
+        'GET /api/keys/stats': {
+          description: 'Get all API key statistics and details'
+        },
+        'POST /api/keys/add': {
+          description: 'Add new API key to the pool',
+          parameters: ['apiKey', 'dailyLimit?', 'monthlyLimit?']
+        },
+        'DELETE /api/keys/remove/:keyId': {
+          description: 'Remove API key from the pool'
+        },
+        'PUT /api/keys/update/:keyId': {
+          description: 'Update API key settings',
+          parameters: ['dailyLimit?', 'monthlyLimit?', 'priority?']
+        },
+        'POST /api/keys/test': {
+          description: 'Test if an API key is valid',
+          parameters: ['apiKey']
         }
       },
       limits: {

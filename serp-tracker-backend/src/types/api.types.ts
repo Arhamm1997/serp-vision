@@ -10,6 +10,7 @@ export interface ISerpApiKey {
   lastUsed: Date;
   errorCount: number;
   successRate: number;
+  monthlyResetAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -41,6 +42,12 @@ export interface ISearchResult {
   searchedResults: number;
   timestamp: Date;
   found: boolean;
+  searchMetadata?: {
+    searchTime?: string;
+    searchId?: string;
+    location?: string;
+    device?: string;
+  };
 }
 
 export interface IBulkSearchRequest {

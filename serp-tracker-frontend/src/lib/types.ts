@@ -21,6 +21,27 @@ export type SerpData = {
 export type SerpAnalysisResult = {
   serpData: SerpData[];
   aiInsights: string;
+  keyStats?: KeyStats;
+};
+
+// API Key Statistics Type
+export type KeyStats = {
+  total: number;
+  active: number;
+  exhausted: number;
+  paused: number;
+  totalUsageToday: number;
+  totalCapacity: number;
+  hasEnvironmentKeys: boolean;
+  usagePercentage: number;
+  remainingCapacity: number;
+  estimatedTimeToExhaustion?: string;
+  criticalKeys: number;
+  warningKeys: number;
+  totalUsageThisMonth: number;
+  totalMonthlyCapacity: number;
+  monthlyUsagePercentage: number;
+  userProvidedKey?: boolean;
 };
 
 // Backend API Response Types
@@ -29,14 +50,7 @@ export type BackendApiResponse<T = any> = {
   data?: T;
   message?: string;
   errors?: string[];
-  keyStats?: {
-    total: number;
-    active: number;
-    exhausted: number;
-    paused?: number;
-    totalUsageToday: number;
-    totalCapacity?: number;
-  };
+  keyStats?: KeyStats;
 };
 
 export type BackendSearchResult = {
@@ -68,6 +82,9 @@ export type BackendBulkResult = {
     active: number;
     exhausted: number;
     totalUsageToday: number;
+    totalUsageThisMonth?: number;
+    totalMonthlyCapacity?: number;
+    monthlyUsagePercentage?: number;
   };
 };
 

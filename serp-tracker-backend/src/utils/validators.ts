@@ -149,3 +149,55 @@ export const validateCountryCode = (country: string): boolean => {
   
   return validCountries.includes(country.toUpperCase());
 };
+
+// Middleware for validating API key addition
+export const validateApiKey = (req: any, res: any, next: any) => {
+  const schema = Joi.object({
+    apiKey: Joi.string().required().min(32).max(64).trim(),
+    dailyLimit: Joi.number().integer().min(1).max(50000).default(250),
+    monthlyLimit: Joi.number().integer().min(1).max(500000).default(250)
+  });
+
+  const { error, value } = schema.validate(req.body, { abortEarly: false });
+
+  if (error) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: error.details.map((detail: any) => detail.message)
+    });
+  }
+
+  // Additional API key format validation
+  if (!validateApiKeyFormat(value.apiKey)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid API key format'
+    });
+  }
+
+  req.body = value;
+  next();
+};
+
+// Middleware for validating API key updates
+export const validateKeyUpdate = (req: any, res: any, next: any) => {
+  const schema = Joi.object({
+    dailyLimit: Joi.number().integer().min(1).max(50000).optional(),
+    monthlyLimit: Joi.number().integer().min(1).max(500000).optional(),
+    priority: Joi.number().integer().min(1).max(100).optional()
+  }).min(1); // At least one field must be provided
+
+  const { error, value } = schema.validate(req.body, { abortEarly: false });
+
+  if (error) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: error.details.map((detail: any) => detail.message)
+    });
+  }
+
+  req.body = value;
+  next();
+};
