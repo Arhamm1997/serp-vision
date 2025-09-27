@@ -54,6 +54,19 @@ class Server {
     // CORS configuration - must be before other middleware
     this.app.use(corsMiddleware);
 
+    // Content-Type charset handling middleware
+    this.app.use((req, res, next) => {
+      // Normalize content-type header to avoid charset issues
+      if (req.headers['content-type']) {
+        const contentType = req.headers['content-type'];
+        // Replace charset=UTF-8 with charset=utf-8 (lowercase) for consistency
+        req.headers['content-type'] = contentType
+          .replace(/charset=UTF-8/gi, 'charset=utf-8')
+          .replace(/;\s*charset=utf-8/gi, ''); // Remove charset entirely to avoid parsing issues
+      }
+      next();
+    });
+
     // Compression for better performance
     this.app.use(compression({
       filter: (req, res) => {
@@ -65,13 +78,18 @@ class Server {
       level: 6
     }));
 
-    // Enhanced body parsing with proper error handling
+    // Enhanced body parsing with proper charset handling
     this.app.use(express.json({ 
       limit: '10mb',
-      type: ['application/json'],
+      type: (req) => {
+        // Accept JSON with any charset
+        const contentType = req.headers['content-type'];
+        return !!(contentType && contentType.includes('application/json'));
+      },
+      strict: false, // Allow non-strict JSON parsing
       verify: (req, res, buf) => {
         try {
-          JSON.parse(buf.toString());
+          JSON.parse(buf.toString('utf8'));
         } catch (e) {
           logger.error('Invalid JSON in request body:', {
             error: (e instanceof Error ? e.message : String(e)),
@@ -86,7 +104,12 @@ class Server {
     this.app.use(express.urlencoded({ 
       extended: true, 
       limit: '10mb',
-      parameterLimit: 100
+      parameterLimit: 100,
+      type: (req) => {
+        // Accept URL-encoded with any charset
+        const contentType = req.headers['content-type'];
+        return !!(contentType && contentType.includes('application/x-www-form-urlencoded'));
+      }
     }));
 
     // JSON parsing error handler
