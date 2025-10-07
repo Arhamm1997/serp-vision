@@ -239,7 +239,7 @@ class Server {
 
   private async tryPort(port: number, maxRetries: number = 10): Promise<number> {
     return new Promise((resolve, reject) => {
-      const testServer = this.app.listen(port, () => {
+      const testServer = this.app.listen(port, '0.0.0.0', () => {
         testServer.close(() => {
           resolve(port);
         });
@@ -290,12 +290,13 @@ class Server {
       const availablePort = await this.tryPort(this.port);
       this.port = availablePort;
 
-      // Start server
-      this.server = this.app.listen(this.port, () => {
+      // Start server - listen on all interfaces (0.0.0.0) to accept both IPv4 and IPv6
+      this.server = this.app.listen(this.port, '0.0.0.0', () => {
         logger.info('🚀 SERP Tracker Server started successfully!');
         logger.info(`📍 Server running on port: ${this.port}`);
         logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-        logger.info(`🔗 Server URL: http://localhost:${this.port}`);
+        logger.info(`🔗 Local: http://localhost:${this.port}`);
+        logger.info(`🔗 Network: http://0.0.0.0:${this.port}`);
         logger.info(`📋 API Documentation: http://localhost:${this.port}/api`);
         logger.info(`🏥 Health Check: http://localhost:${this.port}/health`);
         
@@ -311,10 +312,22 @@ class Server {
         }
       });
 
-      // Set server timeout
-      this.server.timeout = 60000; // 60 seconds
-      this.server.keepAliveTimeout = 65000; // 65 seconds
-      this.server.headersTimeout = 66000; // 66 seconds
+      // Set server timeout - increase for bulk operations (5 minutes)
+      this.server.timeout = 300000; // 300 seconds (5 minutes)
+      this.server.keepAliveTimeout = 305000; // 305 seconds
+      this.server.headersTimeout = 310000; // 310 seconds
+      
+      // Handle server errors
+      this.server.on('error', (error: any) => {
+        logger.error('❌ Server error:', error);
+      });
+      
+      this.server.on('clientError', (err: any, socket: any) => {
+        logger.error('❌ Client error:', err);
+        if (socket.writable) {
+          socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+        }
+      });
 
       // Setup graceful shutdown
       this.setupGracefulShutdown();

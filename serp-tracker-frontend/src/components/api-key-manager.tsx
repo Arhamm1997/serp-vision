@@ -181,20 +181,36 @@ export function ApiKeyManager({ onApiKeysChange, onHide }: ApiKeyManagerProps) {
         
         toast({
           title: "API Key Added",
-          description: "The API key has been added successfully and is now active.",
+          description: data.message || "The API key has been added successfully and is now active.",
         });
       } else {
+        // Handle specific error cases
+        let errorTitle = "Failed to Add API Key";
+        let errorDescription = data.message || "Unable to add the API key.";
+        
+        // Check for specific error types
+        if (data.message && data.message.includes('already exists')) {
+          errorTitle = "Duplicate API Key";
+          errorDescription = "This API key is already in the pool. Each key can only be added once.";
+        } else if (data.message && data.message.includes('rate limit')) {
+          errorTitle = "Rate Limit Reached";
+          errorDescription = "Too many validation requests. Please wait a few minutes or add the key directly to backend .env file.";
+        } else if (data.message && data.message.includes('Invalid API key')) {
+          errorTitle = "Invalid API Key";
+          errorDescription = "The API key you entered is not valid. Please check your key at serpapi.com/manage-api-key";
+        }
+        
         toast({
           variant: "destructive",
-          title: "Failed to Add API Key",
-          description: data.message || "Unable to add the API key.",
+          title: errorTitle,
+          description: errorDescription,
         });
       }
     } catch (error) {
       toast({
         variant: "destructive",
-        title: "Error",
-        description: "Failed to connect to backend. Please try again.",
+        title: "Connection Error",
+        description: "Failed to connect to backend. Please ensure the backend server is running on port 5000.",
       });
     } finally {
       setIsTestingKey(null);
@@ -279,11 +295,6 @@ export function ApiKeyManager({ onApiKeysChange, onHide }: ApiKeyManagerProps) {
         description: "Failed to connect to backend. Please try again.",
       });
     }
-    
-    toast({
-      title: "API Key Removed",
-      description: `Key ${removedKey.slice(0, 8)}... has been removed.`,
-    });
   };
 
   const setActiveKey = (idx: number) => {
@@ -350,7 +361,7 @@ export function ApiKeyManager({ onApiKeysChange, onHide }: ApiKeyManagerProps) {
       <CardContent>
         <Tabs defaultValue="user-keys" className="w-full">
           <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="user-keys">Your Keys ({apiKeys.length})</TabsTrigger>
+            <TabsTrigger value="user-keys">Your Keys ({detailedStats.length})</TabsTrigger>
             <TabsTrigger value="backend-stats">Backend Stats</TabsTrigger>
             <TabsTrigger value="detailed-stats">Key Details</TabsTrigger>
           </TabsList>
@@ -395,7 +406,7 @@ export function ApiKeyManager({ onApiKeysChange, onHide }: ApiKeyManagerProps) {
 
             {/* Current Keys */}
             <div className="space-y-3">
-              {apiKeys.length === 0 ? (
+              {detailedStats.length === 0 ? (
                 <Alert>
                   <AlertCircle className="h-4 w-4" />
                   <AlertDescription>
@@ -407,7 +418,7 @@ export function ApiKeyManager({ onApiKeysChange, onHide }: ApiKeyManagerProps) {
                     )}
                   </AlertDescription>
                 </Alert>
-              ) : detailedStats.length > 0 ? (
+              ) : (
                 detailedStats.map((keyStats, idx) => {
                   return (
                     <Card key={keyStats.id} className="relative">
@@ -489,14 +500,6 @@ export function ApiKeyManager({ onApiKeysChange, onHide }: ApiKeyManagerProps) {
                     </Card>
                   );
                 })
-              ) : (
-                <div className="text-center py-8">
-                  <Key className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                  <h3 className="text-lg font-medium mb-2">No API Keys Found</h3>
-                  <p className="text-muted-foreground mb-4">
-                    Add your first SerpAPI key to start tracking keywords.
-                  </p>
-                </div>
               )}
             </div>
           </TabsContent>

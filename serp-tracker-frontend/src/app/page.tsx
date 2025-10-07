@@ -6,6 +6,7 @@ import { getSerpAnalysis, checkBackendHealth, getApiKeyStats } from '@/app/actio
 import { KeywordForm, type KeywordFormValues } from '@/components/keyword-form';
 import { ResultsDisplay } from '@/components/results-display';
 import { LoadingSkeleton } from '@/components/loading-skeleton';
+import { KeywordTrackingProgress, type TrackingProgress } from '@/components/keyword-tracking-progress';
 import Logo from '@/components/logo';
 import { Progress } from '@/components/ui/progress';
 import { ApiKeyManager } from '@/components/api-key-manager';
@@ -36,6 +37,13 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const [totalKeywords, setTotalKeywords] = useState(0);
+  const [trackingProgress, setTrackingProgress] = useState<TrackingProgress>({
+    total: 0,
+    processed: 0,
+    successful: 0,
+    failed: 0,
+    percentComplete: 0
+  });
   const [backendStatus, setBackendStatus] = useState<{
     connected: boolean | null;
     message: string;
@@ -72,6 +80,15 @@ export default function Home() {
     const keywords = [...new Set(data.keywords.split(/\r?\n/).map(k => k.trim()).filter(Boolean))];
     setTotalKeywords(keywords.length);
 
+    // Initialize tracking progress
+    setTrackingProgress({
+      total: keywords.length,
+      processed: 0,
+      successful: 0,
+      failed: 0,
+      percentComplete: 0
+    });
+
     // Progress simulation with realistic messages
     const progressSteps = [
       'Initializing analysis...',
@@ -98,6 +115,19 @@ export default function Home() {
           setProgressMessage(progressSteps[stepIndex]);
         }
         
+        // Update tracking progress
+        const estimatedProcessed = Math.floor((newProgress / 100) * keywords.length);
+        const estimatedSuccessful = Math.floor(estimatedProcessed * 0.85); // Estimate 85% success
+        const estimatedFailed = estimatedProcessed - estimatedSuccessful;
+        
+        setTrackingProgress({
+          total: keywords.length,
+          processed: estimatedProcessed,
+          successful: estimatedSuccessful,
+          failed: estimatedFailed,
+          percentComplete: Math.round(newProgress)
+        });
+        
         return newProgress;
       });
     }, 800);
@@ -119,6 +149,18 @@ export default function Home() {
       clearInterval(progressInterval);
       setProgress(100);
       setProgressMessage('Analysis complete!');
+      
+      // Update final tracking progress
+      const finalSuccessful = result.serpData?.filter((d: any) => d.found).length || 0;
+      const finalFailed = keywords.length - finalSuccessful;
+      
+      setTrackingProgress({
+        total: keywords.length,
+        processed: keywords.length,
+        successful: finalSuccessful,
+        failed: finalFailed,
+        percentComplete: 100
+      });
       
       // Small delay to show completion, then refresh stats
       setTimeout(async () => {
@@ -357,12 +399,22 @@ export default function Home() {
         {/* Progress and Results */}
         <div className="mt-12">
           {isLoading && (
-            <div className="w-full max-w-md mx-auto space-y-4 mb-8">
-              <p className="text-center text-foreground/80">{progressText}</p>
-              <Progress value={progress} className="w-full" />
-              <p className="text-center text-sm text-muted-foreground">
-                {progress < 100 ? `${Math.round(progress)}% complete` : 'Processing complete!'}
-              </p>
+            <div className="space-y-6 mb-8">
+              {/* New Progress Bar Component */}
+              <KeywordTrackingProgress 
+                progress={trackingProgress} 
+                isTracking={isLoading}
+                className="max-w-3xl mx-auto"
+              />
+              
+              {/* Legacy Progress Display (can be removed if you prefer only the new component) */}
+              <div className="w-full max-w-md mx-auto space-y-4">
+                <p className="text-center text-foreground/80">{progressText}</p>
+                <Progress value={progress} className="w-full" />
+                <p className="text-center text-sm text-muted-foreground">
+                  {progress < 100 ? `${Math.round(progress)}% complete` : 'Processing complete!'}
+                </p>
+              </div>
             </div>
           )}
           

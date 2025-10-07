@@ -4,7 +4,7 @@ import { BulkKeywordProcessor } from '../services/bulkKeywordProcessor';
 import { validateBulkSearchRequest, validateSearchRequest } from '../utils/validators';
 import { logger } from '../utils/logger';
 import { SearchResultModel } from '../models/SearchResult';
-import type { ApiResponse } from '../types/api.types';
+import type { ApiResponse, IFailedSearch } from '../types/api.types';
 import { PipelineStage } from 'mongoose';
 
 interface GetSerpAnalysisInput {
@@ -178,8 +178,34 @@ export const trackBulkKeywords = async (req: Request, res: Response, next: NextF
 };
 
 export const getSerpAnalysis = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  const requestStartTime = Date.now();
+  
+  // Set a timeout for the entire request (290 seconds - just before server timeout)
+  const timeoutId = setTimeout(() => {
+    if (!res.headersSent) {
+      logger.error('⏱️ Request timeout after 290 seconds');
+      res.status(504).json({
+        success: false,
+        message: 'Request timeout. Please try with fewer keywords or try again later.',
+        suggestion: 'For large keyword lists, try processing in smaller batches of 20-30 keywords.',
+        timeout: '290000ms'
+      });
+    }
+  }, 290000); // 290 seconds (just before 5-minute server timeout)
+
   try {
     const startTime = Date.now();
+    
+    logger.info('📥 Received SERP analysis request', {
+      ip: req.ip,
+      userAgent: req.get('User-Agent'),
+      bodySize: JSON.stringify(req.body).length
+    });
+    
+    // Remove empty apiKey before validation to prevent "not allowed to be empty" error
+    if (req.body && typeof req.body.apiKey === 'string' && req.body.apiKey.trim() === '') {
+      delete req.body.apiKey;
+    }
     
     // Comprehensive input validation
     const requestData = req.body as GetSerpAnalysisInput;
@@ -307,7 +333,11 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
           totalResults: result.totalResults,
           country: result.country,
           location: [city, state].filter(Boolean).join(', ') || country,
-          timestamp: result.timestamp
+          timestamp: result.timestamp,
+          // NEW: Add position validation data
+          positionConfidence: result.positionValidation?.confidence,
+          positionSource: result.positionValidation?.positionSource,
+          serpFeatures: result.positionValidation?.serpFeatures?.map((f: any) => f.type) || []
         }];
 
         processingDetails.successful = 1;
@@ -353,14 +383,18 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
             totalResults: result.totalResults,
             country: result.country,
             location: [city, state].filter(Boolean).join(', ') || country,
-            timestamp: result.timestamp
+            timestamp: result.timestamp,
+            // NEW: Add position validation data
+            positionConfidence: result.positionValidation?.confidence,
+            positionSource: result.positionValidation?.positionSource,
+            serpFeatures: result.positionValidation?.serpFeatures?.map((f: any) => f.type) || []
           };
         });
 
-        // Add failed keywords with proper structure
-        results.failed.forEach((failedKeyword: string) => {
+        // ✅ FIX: Handle failed searches properly - IFailedSearch objects instead of strings
+        results.failed.forEach((failedSearch: IFailedSearch) => {
           serpData.push({
-            keyword: failedKeyword,
+            keyword: failedSearch.keyword,
             rank: 0,
             previousRank: 0,
             url: '',
@@ -371,8 +405,12 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
             totalResults: 0,
             country: country,
             location: [city, state].filter(Boolean).join(', ') || country,
-            error: 'Failed to process keyword',
-            timestamp: new Date()
+            error: failedSearch.error,
+            errorType: failedSearch.errorType,
+            timestamp: failedSearch.timestamp,
+            retryCount: failedSearch.retryCount || 0,
+            positionConfidence: 0,
+            positionSource: 'unknown'
           });
         });
 
@@ -409,6 +447,9 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
 
     logger.info(`✅ SERP analysis completed: ${processingDetails.successful}/${keywords.length} keywords processed successfully (${totalProcessingTime}ms)`);
 
+    // Clear the timeout since we're responding successfully
+    clearTimeout(timeoutId);
+
     // Check if response has already been sent (e.g., by timeout middleware)
     if (res.headersSent) {
       logger.warn('⚠️ Response already sent, skipping response in getSerpAnalysis');
@@ -440,8 +481,18 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
     });
 
   } catch (error) {
+    // Clear the timeout
+    clearTimeout(timeoutId);
+    
     const errorMessage = (error as Error).message;
-    logger.error('❌ Error in getSerpAnalysis:', error);
+    const errorStack = (error as Error).stack;
+    
+    logger.error('❌ Error in getSerpAnalysis:', {
+      message: errorMessage,
+      stack: errorStack,
+      duration: Date.now() - requestStartTime,
+      body: req.body
+    });
     
     // Check if response has already been sent (e.g., by timeout middleware)
     if (res.headersSent) {
@@ -451,18 +502,30 @@ export const getSerpAnalysis = async (req: Request, res: Response, next: NextFun
     
     // Provide user-friendly error messages
     let userMessage = 'Failed to analyze keywords';
+    let statusCode = 500;
+    
     if (errorMessage.includes('API key')) {
       userMessage = 'API key issue: ' + errorMessage;
+      statusCode = 401;
     } else if (errorMessage.includes('quota') || errorMessage.includes('limit')) {
-      userMessage = 'API quota exceeded. Please try again later or use a different API key.';
-    } else if (errorMessage.includes('timeout')) {
+      userMessage = 'API quota exceeded. Please try again later or add more API keys.';
+      statusCode = 429;
+    } else if (errorMessage.includes('timeout') || errorMessage.includes('ETIMEDOUT')) {
       userMessage = 'Request timeout. Please try again with fewer keywords.';
+      statusCode = 504;
+    } else if (errorMessage.includes('ECONNREFUSED') || errorMessage.includes('ENOTFOUND')) {
+      userMessage = 'Unable to connect to SerpAPI service. Please try again later.';
+      statusCode = 503;
+    } else if (errorMessage.includes('Invalid JSON') || errorMessage.includes('Unexpected token')) {
+      userMessage = 'Invalid request format. Please check your request data.';
+      statusCode = 400;
     }
     
-    res.status(500).json({ 
+    res.status(statusCode).json({ 
       success: false, 
       message: userMessage,
-      details: process.env.NODE_ENV === 'development' ? errorMessage : undefined
+      details: process.env.NODE_ENV === 'development' ? errorMessage : undefined,
+      timestamp: new Date().toISOString()
     });
   }
 };
@@ -813,7 +876,8 @@ function generateCSV(results: any[]): string {
   const headers = [
     'Keyword', 'Domain', 'Position', 'URL', 'Title', 'Description',
     'Country', 'City', 'State', 'Postal Code', 'Total Results',
-    'Searched Results', 'Found', 'Processing Time', 'API Key Used', 'Timestamp'
+    'Searched Results', 'Found', 'Processing Time', 'API Key Used', 
+    'Position Confidence', 'Position Source', 'Timestamp'
   ];
   
   const csvRows = [headers.join(',')];
@@ -835,6 +899,8 @@ function generateCSV(results: any[]): string {
       result.found ? 'Yes' : 'No',
       (result as any).processingTime || 'N/A',
       (result as any).apiKeyUsed || 'unknown',
+      (result.positionValidation?.confidence || 'N/A'),
+      (result.positionValidation?.positionSource || 'N/A'),
       result.timestamp?.toISOString() || ''
     ];
     csvRows.push(row.join(','));

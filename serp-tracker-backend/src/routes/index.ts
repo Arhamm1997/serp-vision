@@ -17,6 +17,10 @@ export const setupRoutes = (app: Application): void => {
       description: 'Professional API for tracking keyword positions with multiple SerpApi key support and automatic failover',
       documentation: 'https://github.com/your-repo/serp-tracker',
       endpoints: {
+        'POST /api/search/analyze': {
+          description: 'Analyze keywords with AI insights (Primary endpoint - handles single or bulk)',
+          parameters: ['keywords', 'domain', 'country', 'city?', 'state?', 'postalCode?', 'apiKey?']
+        },
         'POST /api/search/track': {
           description: 'Track a single keyword position',
           parameters: ['keyword', 'domain', 'country', 'city?', 'state?', 'postalCode?']

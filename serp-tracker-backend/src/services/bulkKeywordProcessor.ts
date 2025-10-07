@@ -1,6 +1,6 @@
 // src/services/bulkKeywordProcessor.ts
 import { SerpApiPoolManager } from './serpApiPoolManager';
-import { ISearchOptions, ISearchResult, IBulkSearchResult, IProcessingProgress } from '../types/api.types';
+import { ISearchOptions, ISearchResult, IBulkSearchResult, IProcessingProgress, IFailedSearch } from '../types/api.types';
 import { logger } from '../utils/logger';
 import { delay } from '../utils/helpers';
 
@@ -17,7 +17,7 @@ export class BulkKeywordProcessor {
   private serpApiManager = SerpApiPoolManager.getInstance();
   private config: BulkProcessingConfig;
   private processedCount = 0;
-  private failedKeywords: string[] = [];
+  private failedKeywords: IFailedSearch[] = [];
   private successfulResults: ISearchResult[] = [];
   private startTime = 0;
   private currentBatchDelay = 0;
@@ -115,7 +115,32 @@ export class BulkKeywordProcessor {
         
         // Add failed keywords to retry queue
         if (this.config.retryFailedKeywords) {
-          this.failedKeywords.push(...batch);
+          batch.forEach(keyword => {
+            const errorMessage = (error as Error).message;
+            let errorType: IFailedSearch['errorType'] = 'unknown';
+            
+            if (errorMessage.includes('quota') || errorMessage.includes('limit exceeded')) {
+              errorType = 'quota_exceeded';
+            } else if (errorMessage.includes('rate limit') || errorMessage.includes('429')) {
+              errorType = 'rate_limited';
+            } else if (errorMessage.includes('timeout')) {
+              errorType = 'timeout';
+            } else if (errorMessage.includes('network') || errorMessage.includes('fetch')) {
+              errorType = 'network_error';
+            } else if (errorMessage.includes('parse') || errorMessage.includes('invalid response')) {
+              errorType = 'parse_error';
+            } else if (errorMessage.includes('400') || errorMessage.includes('invalid')) {
+              errorType = 'invalid_request';
+            }
+            
+            this.failedKeywords.push({
+              keyword,
+              error: errorMessage,
+              errorType,
+              timestamp: new Date(),
+              retryCount: 0
+            });
+          });
           logger.warn(`Added ${batch.length} keywords to retry queue`);
         }
         continue;
@@ -183,11 +208,36 @@ export class BulkKeywordProcessor {
         results.push(result.value);
       } else {
         const keyword = keywords[index];
-        logger.error(`Keyword "${keyword}" processing failed:`, result.reason);
+        const error = result.reason as Error;
+        logger.error(`Keyword "${keyword}" processing failed:`, error);
         
         // Add to failed list if not already there
-        if (!this.failedKeywords.includes(keyword)) {
-          this.failedKeywords.push(keyword);
+        const alreadyFailed = this.failedKeywords.some(f => f.keyword === keyword);
+        if (!alreadyFailed) {
+          const errorMessage = error.message;
+          let errorType: IFailedSearch['errorType'] = 'unknown';
+          
+          if (errorMessage.includes('quota') || errorMessage.includes('limit exceeded')) {
+            errorType = 'quota_exceeded';
+          } else if (errorMessage.includes('rate limit') || errorMessage.includes('429')) {
+            errorType = 'rate_limited';
+          } else if (errorMessage.includes('timeout')) {
+            errorType = 'timeout';
+          } else if (errorMessage.includes('network') || errorMessage.includes('fetch')) {
+            errorType = 'network_error';
+          } else if (errorMessage.includes('parse') || errorMessage.includes('invalid response')) {
+            errorType = 'parse_error';
+          } else if (errorMessage.includes('400') || errorMessage.includes('invalid')) {
+            errorType = 'invalid_request';
+          }
+          
+          this.failedKeywords.push({
+            keyword,
+            error: errorMessage,
+            errorType,
+            timestamp: new Date(),
+            retryCount: 0
+          });
         }
       }
     });
@@ -205,25 +255,26 @@ export class BulkKeywordProcessor {
     while (keywordsToRetry.length > 0 && retryAttempt <= this.config.maxRetries) {
       logger.info(`🔄 Retry attempt ${retryAttempt}/${this.config.maxRetries} for ${keywordsToRetry.length} keywords`);
       
-      const retryResults: string[] = [];
+      const retryResults: IFailedSearch[] = [];
       const retryDelay = Math.min(this.config.delayBetweenBatches * retryAttempt, 5000);
       
-      for (const keyword of keywordsToRetry) {
+      for (const failedSearch of keywordsToRetry) {
         try {
           await delay(retryDelay); // Longer delay for retries
           
-          logger.debug(`Retrying: "${keyword}"`);
-          const result = await this.serpApiManager.trackKeyword(keyword, options);
+          logger.debug(`Retrying: "${failedSearch.keyword}"`);
+          const result = await this.serpApiManager.trackKeyword(failedSearch.keyword, options);
           this.successfulResults.push(result);
           
           // Remove from failed list
-          this.failedKeywords = this.failedKeywords.filter(k => k !== keyword);
+          this.failedKeywords = this.failedKeywords.filter(f => f.keyword !== failedSearch.keyword);
           
-          logger.info(`✅ Retry successful: "${keyword}" - Position: ${result.position || 'Not Found'}`);
+          logger.info(`✅ Retry successful: "${failedSearch.keyword}" - Position: ${result.position || 'Not Found'}`);
           
         } catch (error) {
-          logger.error(`❌ Retry failed: "${keyword}" - ${(error as Error).message}`);
-          retryResults.push(keyword);
+          logger.error(`❌ Retry failed: "${failedSearch.keyword}" - ${(error as Error).message}`);
+          failedSearch.retryCount = (failedSearch.retryCount || 0) + 1;
+          retryResults.push(failedSearch);
         }
         
         // Update progress during retries

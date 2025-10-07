@@ -5,18 +5,19 @@ import type { SerpAnalysisResult } from '@/lib/types';
 import { AiInsights } from '@/components/ai-insights';
 import { ResultCard } from '@/components/result-card';
 import { RankingStatistics } from '@/components/ranking-statistics';
+import { RankingTable } from '@/components/ranking-table';
 import { ApiKeyStatsDisplay } from '@/components/api-key-stats-display';
 import { DownloadButton } from './download-button';
 import { CardTitle, CardHeader, Card } from './ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { Sparkles, Grid3X3, BarChart3, Trophy } from 'lucide-react';
+import { Sparkles, Grid3X3, BarChart3, Trophy, Table as TableIcon } from 'lucide-react';
 
 interface ResultsDisplayProps {
   analysis: SerpAnalysisResult;
 }
 
 export function ResultsDisplay({ analysis }: ResultsDisplayProps) {
-  const [activeTab, setActiveTab] = useState('insights');
+  const [activeTab, setActiveTab] = useState('table');
 
   if (!analysis || !analysis.serpData || !analysis.aiInsights) {
     return null;
@@ -68,7 +69,11 @@ export function ResultsDisplay({ analysis }: ResultsDisplayProps) {
 
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-fit grid-cols-3">
+        <TabsList className="grid w-fit grid-cols-4">
+          <TabsTrigger value="table" className="flex items-center gap-2">
+            <TableIcon className="h-4 w-4" />
+            Ranking Table
+          </TabsTrigger>
           <TabsTrigger value="insights" className="flex items-center gap-2">
             <Sparkles className="h-4 w-4" />
             AI Insights
@@ -82,6 +87,13 @@ export function ResultsDisplay({ analysis }: ResultsDisplayProps) {
             Performance Stats
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="table" className="space-y-6">
+          <RankingTable 
+            data={sortedData} 
+            domain={analysis.keyStats?.userProvidedKey ? undefined : 'Your Domain'}
+          />
+        </TabsContent>
 
         <TabsContent value="insights" className="space-y-6">
           <Card className="glass-card">

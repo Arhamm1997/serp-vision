@@ -67,15 +67,16 @@ export async function getSerpAnalysis(input: GetSerpAnalysisInput): Promise<Serp
   let aiInsights = '';
   
   // Parse keywords - handle both string and array input
-  const keywords = Array.isArray(input.keywords)
+  let keywords: string[] = Array.isArray(input.keywords)
     ? input.keywords
     : [...new Set(input.keywords.split(/\r?\n/).map(k => k.trim()).filter(Boolean))];
 
+  // NO LIMIT - Process all keywords
   console.log(`Processing ${keywords.length} keywords for ${input.url}`);
   
   try {
     // Prepare the payload for the backend with enhanced location data
-    const payload = {
+    const payload: any = {
       keywords: keywords,  // Send as array always
       domain: input.url,
       country: input.location || 'US',
@@ -84,8 +85,7 @@ export async function getSerpAnalysis(input: GetSerpAnalysisInput): Promise<Serp
       postalCode: input.postalCode?.trim() || '',
       language: 'en',
       device: 'desktop',
-      businessName: input.businessName?.trim() || '',
-      apiKey: input.apiKey?.trim() || ''
+      businessName: input.businessName?.trim() || ''
     };
 
     // Prepare headers
@@ -94,7 +94,7 @@ export async function getSerpAnalysis(input: GetSerpAnalysisInput): Promise<Serp
       'User-Agent': 'SERP-Vision-Frontend/2.0'
     };
     
-    // Add API key if provided
+    // Add API key to payload only if provided and non-empty
     if (input.apiKey && input.apiKey.trim() !== '') {
       payload.apiKey = input.apiKey.trim();
       console.log('Using user-provided API key for search');

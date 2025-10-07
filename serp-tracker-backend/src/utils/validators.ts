@@ -22,7 +22,7 @@ export const validateBulkSearchRequest = (data: any) => {
     keywords: Joi.array()
       .items(Joi.string().min(1).max(500).trim())
       .min(1)
-      .max(100)
+      // .max(100)  // REMOVED: No limit on number of keywords
       .required()
       .unique(),
     domain: Joi.string().required().min(1).max(255).trim(),

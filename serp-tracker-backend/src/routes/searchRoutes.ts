@@ -25,7 +25,7 @@ const router = Router();
 // Apply middleware to all routes
 router.use(addSecurityHeaders);
 router.use(sanitizeInputs);
-router.use(requestTimeout(60000)); // 60 second timeout for search operations
+router.use(requestTimeout(300000)); // 300 second timeout for search operations (5 minutes)
 router.use(searchRateLimiter);
 
 // API key validation is now optional - middleware will skip if not configured
@@ -80,10 +80,31 @@ router.get('/export', exportResults);
 // Get current API key statistics and usage
 router.get('/keys/stats', getApiKeyStats);
 
+// In-memory rate limiter for API key testing to prevent SerpAPI 429 errors
+const keyTestRateLimiter = new Map<string, number>();
+const KEY_TEST_COOLDOWN = 10000; // 10 seconds between tests from same IP
+
 // Test endpoint for API connectivity
 router.post('/keys/test', async (req, res): Promise<void> => {
   try {
     const { apiKey } = req.body;
+    const clientIp = req.ip || 'unknown';
+    
+    // Check rate limit
+    const lastTest = keyTestRateLimiter.get(clientIp);
+    const now = Date.now();
+    
+    if (lastTest && now - lastTest < KEY_TEST_COOLDOWN) {
+      const waitTime = Math.ceil((KEY_TEST_COOLDOWN - (now - lastTest)) / 1000);
+      res.status(429).json({
+        success: false,
+        message: `Please wait ${waitTime} seconds before testing another API key`,
+        error: 'RATE_LIMITED',
+        retryAfter: waitTime,
+        timestamp: new Date().toISOString()
+      });
+      return;
+    }
     
     if (!apiKey) {
       res.status(400).json({
@@ -94,6 +115,16 @@ router.post('/keys/test', async (req, res): Promise<void> => {
         }
       });
       return;
+    }
+
+    // Update rate limiter
+    keyTestRateLimiter.set(clientIp, now);
+    
+    // Clean old entries (older than 1 minute)
+    for (const [ip, timestamp] of keyTestRateLimiter.entries()) {
+      if (now - timestamp > 60000) {
+        keyTestRateLimiter.delete(ip);
+      }
     }
 
     // Use the SerpApiPoolManager to test the API key directly
@@ -110,20 +141,53 @@ router.post('/keys/test', async (req, res): Promise<void> => {
         timestamp: new Date().toISOString()
       });
     } else {
-      res.status(400).json({
-        success: false,
-        message: testResult.message,
-        timestamp: new Date().toISOString()
-      });
+      // Check if it's a rate limit error from SerpAPI
+      const isRateLimitError = testResult.message && (
+        testResult.message.toLowerCase().includes('too many requests') ||
+        testResult.message.toLowerCase().includes('rate limit') ||
+        testResult.details?.error === 'rate_limited'
+      );
+      
+      if (isRateLimitError) {
+        res.status(429).json({
+          success: false,
+          message: 'SerpAPI rate limit reached. Please wait a few minutes and try again.',
+          suggestion: 'To avoid this, add the API key directly to the backend .env file instead of testing it from the UI.',
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        res.status(400).json({
+          success: false,
+          message: testResult.message,
+          timestamp: new Date().toISOString()
+        });
+      }
     }
 
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'API key test failed',
-      error: (error as Error).message,
-      timestamp: new Date().toISOString()
-    });
+    const errorMessage = (error as Error).message;
+    const isRateLimitError = errorMessage && (
+      errorMessage.toLowerCase().includes('too many requests') ||
+      errorMessage.toLowerCase().includes('rate limit') ||
+      errorMessage.toLowerCase().includes('429')
+    );
+    
+    if (isRateLimitError) {
+      res.status(429).json({
+        success: false,
+        message: 'SerpAPI rate limit reached. Please wait a few minutes and try again.',
+        suggestion: 'To avoid this, add the API key directly to the backend .env file instead of testing it from the UI.',
+        error: 'SERPAPI_RATE_LIMITED',
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: 'API key test failed',
+        error: errorMessage,
+        timestamp: new Date().toISOString()
+      });
+    }
   }
 });
 

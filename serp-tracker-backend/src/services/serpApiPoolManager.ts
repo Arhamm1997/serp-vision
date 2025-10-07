@@ -3,7 +3,30 @@ import fetch from 'node-fetch';
 import { logger } from '../utils/logger';
 import { ApiKeyModel } from '../models/ApiKey';
 import { SearchResultModel } from '../models/SearchResult';
-import { ISerpApiKey, ISearchOptions, ISearchResult } from '../types/api.types';
+import {
+  ISerpApiKey,
+  ISearchOptions,
+  ISearchResult,
+  ISerpApiResponse,
+  ISerpApiOrganicResult,
+  IPositionValidation,
+  ISerpFeature,
+  ISearchMetadata,
+  IDomainMatchResult,
+  SerpApiError,
+  ApiKeyExhaustedError,
+  AllKeysExhaustedError,
+  IApiKeyTestResult,
+  IApiKeyAddResult,
+  IApiKeyUpdateResult,
+  IApiKeyRemoveResult,
+  IKeyHealthStatus,
+  IPoolStats,
+  PositionSource,
+  SearchApiProvider,
+  IGoogleCustomSearchResponse,
+  IGoogleCustomSearchItem
+} from '../types/api.types';
 
 export class SerpApiPoolManager {
   private static instance: SerpApiPoolManager;
@@ -45,18 +68,25 @@ export class SerpApiPoolManager {
     const keys: ISerpApiKey[] = [];
     let keyIndex = 1;
 
-    // Load keys from environment variables (SERPAPI_KEY_1, SERPAPI_KEY_2, etc.)
+    // Step 1: Load keys from environment variables (SERPAPI_KEY_1, SERPAPI_KEY_2, etc.)
     while (process.env[`SERPAPI_KEY_${keyIndex}`] || keyIndex === 1) {
       const key = process.env[`SERPAPI_KEY_${keyIndex}`] || (process.env.SERPAPI_KEY || '').trim();
-      // Skip placeholder values
-      if (key && key.length > 10 && 
+      // Skip placeholder values and empty keys
+      if (key && 
+          key.length > 10 && 
           key !== 'your_serpapi_key_here' && 
+          key !== 'your_first_actual_key' &&
+          key !== 'your_second_actual_key' &&
+          key !== 'your_third_actual_key' &&
+          key !== 'paste_your_actual_key_here' &&
           !key.includes('your_second_serpapi_key_here') &&
           !key.includes('your_third_serpapi_key_here') &&
-          !key.includes('CHANGE_ME')) { // Better validation
+          !key.includes('CHANGE_ME') &&
+          !key.includes('replace_with')) {
         keys.push({
           id: `serpapi_${keyIndex}`,
           key,
+          provider: 'serpapi',
           dailyLimit: parseInt(process.env[`SERPAPI_DAILY_LIMIT_${keyIndex}`] || process.env.SERPAPI_DAILY_LIMIT || '5000'),
           monthlyLimit: parseInt(process.env[`SERPAPI_MONTHLY_LIMIT_${keyIndex}`] || process.env.SERPAPI_MONTHLY_LIMIT || '100000'),
           usedToday: 0,
@@ -70,31 +100,76 @@ export class SerpApiPoolManager {
           createdAt: new Date(),
           updatedAt: new Date()
         });
-        logger.info(`Loaded API key ${keyIndex} with daily limit: ${keys[keys.length - 1].dailyLimit}`);
+        logger.info(`Loaded environment API key ${keyIndex} (SerpAPI) with daily limit: ${keys[keys.length - 1].dailyLimit}`);
       }
       keyIndex++;
+      if (keyIndex > 100) break; // Safety limit
     }
 
     if (keys.length === 0) {
-      throw new Error('No valid SerpApi keys found in environment variables. Please set SERPAPI_KEY_1, SERPAPI_KEY_2, etc.');
+      logger.warn('⚠️ No valid SerpApi keys found in environment variables. Please set SERPAPI_KEY_1, SERPAPI_KEY_2, etc.');
+      logger.warn('⚠️ The system will work with user-provided API keys from the database.');
     }
 
-    // Load existing usage data from database
+    // Step 2: Load user-added keys from database
+    try {
+      const userAddedKeys = await ApiKeyModel.find({ isUserAdded: true });
+      logger.info(`📦 Found ${userAddedKeys.length} user-added API keys in database`);
+      
+      for (const dbKey of userAddedKeys) {
+        // Check if key is not already loaded from environment
+        const isDuplicate = keys.some(k => k.key === dbKey.apiKey);
+        if (!isDuplicate) {
+          const keyConfig: ISerpApiKey = {
+            id: dbKey.keyId,
+            key: dbKey.apiKey,
+            provider: dbKey.provider || 'serpapi',
+            cseId: dbKey.cseId,
+            dailyLimit: dbKey.dailyLimit,
+            monthlyLimit: dbKey.monthlyLimit,
+            usedToday: dbKey.usedToday,
+            usedThisMonth: dbKey.usedThisMonth,
+            status: dbKey.status === 'exhausted' ? 'active' : dbKey.status,
+            priority: dbKey.priority,
+            lastUsed: dbKey.lastUsed,
+            errorCount: dbKey.errorCount,
+            successRate: dbKey.successRate,
+            monthlyResetAt: dbKey.monthlyResetAt,
+            createdAt: dbKey.createdAt,
+            updatedAt: dbKey.updatedAt
+          };
+          keys.push(keyConfig);
+          logger.info(`✅ Loaded user-added ${dbKey.provider} key: ${dbKey.keyId} (Daily: ${dbKey.usedToday}/${dbKey.dailyLimit}, Monthly: ${dbKey.usedThisMonth}/${dbKey.monthlyLimit})`);
+        } else {
+          logger.debug(`⏩ Skipping duplicate key from database: ${dbKey.keyId}`);
+        }
+      }
+    } catch (error) {
+      logger.error('❌ Failed to load user-added keys from database:', error);
+    }
+
+    // Step 3: Load/update existing usage data from database for environment keys
     for (const keyConfig of keys) {
+      // Skip if already loaded from database
+      if (keyConfig.id.startsWith('user_')) continue;
+      
       try {
         const existingKey = await ApiKeyModel.findOne({ keyId: keyConfig.id });
         if (existingKey) {
           keyConfig.usedToday = existingKey.usedToday;
           keyConfig.usedThisMonth = existingKey.usedThisMonth;
-          keyConfig.status = existingKey.status === 'exhausted' ? 'active' : existingKey.status; // Reset exhausted keys on startup
+          keyConfig.status = existingKey.status === 'exhausted' ? 'active' : existingKey.status;
           keyConfig.errorCount = existingKey.errorCount;
           keyConfig.successRate = existingKey.successRate;
           keyConfig.lastUsed = existingKey.lastUsed;
           logger.debug(`Restored usage data for key ${keyConfig.id}: ${keyConfig.usedToday}/${keyConfig.dailyLimit}`);
         } else {
-          // Create new database entry
+          // Create new database entry for environment key
           await ApiKeyModel.create({
             keyId: keyConfig.id,
+            apiKey: keyConfig.key,
+            provider: keyConfig.provider || 'serpapi',
+            cseId: keyConfig.cseId,
             dailyLimit: keyConfig.dailyLimit,
             monthlyLimit: keyConfig.monthlyLimit,
             usedToday: 0,
@@ -103,8 +178,10 @@ export class SerpApiPoolManager {
             priority: keyConfig.priority,
             errorCount: 0,
             successRate: 100,
-            monthlyResetAt: new Date()
+            monthlyResetAt: new Date(),
+            isUserAdded: false
           });
+          logger.debug(`Created database entry for environment key: ${keyConfig.id}`);
         }
       } catch (error) {
         logger.warn(`Failed to load existing data for key ${keyConfig.id}:`, error);
@@ -113,10 +190,13 @@ export class SerpApiPoolManager {
 
     this.apiKeys = keys;
     const totalCapacity = keys.reduce((sum, k) => sum + k.dailyLimit, 0);
-    logger.info(`Loaded ${keys.length} SerpApi keys with total daily capacity: ${totalCapacity.toLocaleString()}`);
+    const serpApiKeys = keys.filter(k => k.provider === 'serpapi').length;
+    const googleKeys = keys.filter(k => k.provider === 'google_custom_search').length;
+    
+    logger.info(`✅ Loaded ${keys.length} total API keys (${serpApiKeys} SerpAPI, ${googleKeys} Google Custom Search) with total daily capacity: ${totalCapacity.toLocaleString()}`);
   }
 
-  public async trackKeyword(keyword: string, options: ISearchOptions & { apiKey?: string }): Promise<ISearchResult> {
+  public async trackKeyword(keyword: string, options: ISearchOptions): Promise<ISearchResult> {
     if (!this.isInitialized) {
       throw new Error('SerpApi Pool Manager not initialized. Call initialize() first.');
     }
@@ -144,10 +224,15 @@ export class SerpApiPoolManager {
       try {
         logger.debug(`Using provided API key for keyword: "${keyword}"`);
         const result = await this.makeRequest(tempKeyConfig, keyword, options);
-        (result as any).processingTime = Date.now() - startTime;
+        result.searchMetadata.processingTime = Date.now() - startTime;
         return result;
       } catch (error) {
-        throw new Error(`Failed to use provided API key: ${(error as Error).message}`);
+        throw new SerpApiError(
+          `Failed to use provided API key: ${(error as Error).message}`,
+          'invalid_request',
+          undefined,
+          { providedKey: true }
+        );
       }
     }
 
@@ -160,10 +245,14 @@ export class SerpApiPoolManager {
       const keyConfig = await this.getNextAvailableKey();
 
       if (!keyConfig) {
-        throw new Error('All SerpApi keys exhausted or unavailable. Please check your API key limits.');
+        throw new AllKeysExhaustedError(
+          'All SerpApi keys exhausted or unavailable. Please check your API key limits.',
+          this.apiKeys.length,
+          this.apiKeys.filter(k => k.status === 'exhausted').length
+        );
       }
 
-      // Lock this key during usage to prevent concurrent access issues
+      // Lock this key during usage
       if (this.keyUsageLock.get(keyConfig.id)) {
         logger.debug(`Key ${keyConfig.id} is locked, trying next available key`);
         continue;
@@ -176,8 +265,8 @@ export class SerpApiPoolManager {
         const result = await this.makeRequest(keyConfig, keyword, options);
         
         // Add processing metadata
-        (result as any).processingTime = Date.now() - startTime;
-        (result as any).apiKeyUsed = keyConfig.id;
+        result.searchMetadata.processingTime = Date.now() - startTime;
+        result.searchMetadata.apiKeyUsed = keyConfig.id;
 
         // Update usage stats
         await this.updateKeyUsage(keyConfig.id, true);
@@ -185,7 +274,7 @@ export class SerpApiPoolManager {
         // Save result to database
         await this.saveSearchResult(result);
 
-        logger.info(`✅ Keyword "${keyword}" tracked successfully with key ${keyConfig.id} in ${(result as any).processingTime}ms - Position: ${result.position || 'Not Found'}`);
+        logger.info(`✅ Keyword "${keyword}" tracked successfully with key ${keyConfig.id} in ${result.searchMetadata.processingTime}ms - Position: ${result.position || 'Not Found'} (Confidence: ${result.positionValidation.confidence}%)`);
         return result;
 
       } catch (error) {
@@ -202,24 +291,29 @@ export class SerpApiPoolManager {
           await this.updateKeyUsage(keyConfig.id, false);
         }
       } finally {
-        // Always release the lock
         this.keyUsageLock.delete(keyConfig.id);
       }
     }
 
-    throw new Error(`Failed to track keyword "${keyword}" after ${maxRetries} attempts. Last error: ${lastError?.message}`);
+    throw new SerpApiError(
+      `Failed to track keyword "${keyword}" after ${maxRetries} attempts. Last error: ${lastError?.message}`,
+      'unknown',
+      undefined,
+      { keyword, attempts: maxRetries, lastError: lastError?.message }
+    );
   }
 
-  private async getNextAvailableKey(): Promise<ISerpApiKey | null> {
+  private async getNextAvailableKey(provider: SearchApiProvider = 'serpapi'): Promise<ISerpApiKey | null> {
     const availableKeys = this.apiKeys.filter(key =>
       key.status === 'active' &&
+      key.provider === provider &&
       key.usedToday < key.dailyLimit &&
       key.usedThisMonth < key.monthlyLimit &&
-      !this.keyUsageLock.get(key.id) // Not currently locked
+      !this.keyUsageLock.get(key.id)
     );
 
     if (availableKeys.length === 0) {
-      logger.warn('No available API keys found');
+      logger.warn(`No available ${provider} API keys found`);
       return null;
     }
 
@@ -246,26 +340,52 @@ export class SerpApiPoolManager {
   }
 
   private async makeRequest(keyConfig: ISerpApiKey, keyword: string, options: ISearchOptions): Promise<ISearchResult> {
+    const requestStartTime = Date.now();
+    
+    // Check which API provider to use
+    const provider = options.apiProvider || keyConfig.provider || 'serpapi';
+    
+    if (provider === 'google_custom_search') {
+      return this.makeGoogleCustomSearchRequest(keyword, options);
+    } else {
+      return this.makeSerpApiRequest(keyConfig, keyword, options, requestStartTime);
+    }
+  }
+
+  private async makeSerpApiRequest(keyConfig: ISerpApiKey, keyword: string, options: ISearchOptions, requestStartTime: number): Promise<ISearchResult> {
     const params = new URLSearchParams({
-      engine: 'google',
+      engine: options.searchEngine || 'google',
       q: keyword.trim(),
       api_key: keyConfig.key,
       gl: options.country.toLowerCase(),
       hl: options.language || 'en',
-      num: '200', // Search through 200 results (20 pages)
+      num: String(options.maxResults || 120),
+      start: '0',
       device: options.device || 'desktop',
       safe: 'off',
-      filter: '0', // Include duplicate results
-      start: '0' // Start from first result
+      filter: '0',
+      no_cache: 'true'
     });
 
-    // Add location parameters with better formatting
-    if (options.city && options.state) {
-      params.append('location', `${options.city.trim()}, ${options.state.trim()}`);
-    } else if (options.city) {
-      params.append('location', options.city.trim());
-    } else if (options.state) {
-      params.append('location', options.state.trim());
+    // Add location parameters - improved handling for various formats
+    const locationParts: string[] = [];
+    
+    if (options.city) {
+      locationParts.push(options.city.trim());
+    }
+    
+    if (options.state) {
+      locationParts.push(options.state.trim());
+    }
+    
+    if (options.country) {
+      locationParts.push(options.country.toUpperCase());
+    }
+    
+    if (locationParts.length > 0) {
+      const locationString = locationParts.join(', ');
+      params.append('location', locationString);
+      logger.debug(`📍 Location parameter: "${locationString}"`);
     }
 
     if (options.postalCode) {
@@ -273,8 +393,15 @@ export class SerpApiPoolManager {
       if (existingLocation) {
         params.set('location', `${existingLocation} ${options.postalCode.trim()}`);
       } else {
-        params.set('location', options.postalCode.trim());
+        params.set('location', `${options.postalCode.trim()}`);
       }
+    }
+
+    // Add custom parameters if provided
+    if (options.customParams) {
+      Object.entries(options.customParams).forEach(([key, value]) => {
+        params.append(key, value);
+      });
     }
 
     const url = `https://serpapi.com/search?${params.toString()}`;
@@ -284,7 +411,7 @@ export class SerpApiPoolManager {
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {
-      logger.debug(`Making SerpApi request: ${params.get('q')} in ${params.get('gl')}`);
+      logger.debug(`Making SerpApi request: keyword="${params.get('q')}", location="${params.get('location')}", gl=${params.get('gl')}, num=${params.get('num')}`);
       
       const response = await fetch(url, {
         method: 'GET',
@@ -295,36 +422,170 @@ export class SerpApiPoolManager {
         signal: controller.signal
       });
 
+      const responseTime = Date.now();
       clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
+        throw new SerpApiError(
+          `HTTP ${response.status}: ${errorText || response.statusText}`,
+          response.status === 429 ? 'rate_limited' : response.status === 401 ? 'invalid_request' : 'network_error',
+          response.status,
+          { url, errorText }
+        );
       }
 
-      const data = await response.json();
+      const data: ISerpApiResponse = await response.json();
 
       if ((data as any).error) {
-        throw new Error(`SerpApi Error: ${(data as any).error}`);
+        throw new SerpApiError(
+          `SerpApi Error: ${(data as any).error}`,
+          'parse_error',
+          undefined,
+          { serpApiError: (data as any).error }
+        );
       }
 
-      // Check for search information
-      if (!(data as any).search_information) {
-        throw new Error('Invalid response from SerpApi: missing search information');
+      // Validate position field coverage
+      if (data.organic_results && data.organic_results.length > 0) {
+        const resultsWithPosition = data.organic_results.filter(r => r.position && r.position > 0);
+        const positionPercentage = (resultsWithPosition.length / data.organic_results.length) * 100;
+        
+        logger.debug(`📊 Position field coverage: ${resultsWithPosition.length}/${data.organic_results.length} (${positionPercentage.toFixed(1)}%)`);
+        
+        if (resultsWithPosition.length === 0) {
+          logger.error('❌ CRITICAL: SerpAPI is NOT returning position fields! Check your API plan.');
+          logger.error(`Sample result structure: ${JSON.stringify(data.organic_results[0], null, 2)}`);
+        }
       }
 
-      return this.parseSearchResults(keyword, data, options);
+      if (!data.search_information) {
+        throw new SerpApiError(
+          'Invalid response from SerpApi: missing search information',
+          'parse_error',
+          undefined,
+          { data }
+        );
+      }
+
+      return this.parseSearchResults(keyword, data, options, {
+        requestTimestamp: new Date(requestStartTime),
+        responseTimestamp: new Date(responseTime),
+        processingTime: responseTime - requestStartTime,
+        apiKeyUsed: keyConfig.id
+      });
 
     } catch (error) {
       clearTimeout(timeoutId);
       if ((error as any).name === 'AbortError') {
-        throw new Error(`Request timeout after ${timeout}ms`);
+        throw new SerpApiError(`Request timeout after ${timeout}ms`, 'timeout', undefined, { timeout });
       }
       throw error;
     }
   }
 
-  private parseSearchResults(keyword: string, data: any, options: ISearchOptions): ISearchResult {
+  private async makeGoogleCustomSearchRequest(
+    keyword: string,
+    options: ISearchOptions
+  ): Promise<ISearchResult> {
+    const keyConfig = await this.getNextAvailableKey('google_custom_search');
+    if (!keyConfig || keyConfig.provider !== 'google_custom_search') {
+      throw new SerpApiError('No Google Custom Search API key available', 'invalid_request');
+    }
+
+    if (!keyConfig.cseId) {
+      throw new SerpApiError('Google Custom Search Engine ID (CSE ID) is required', 'invalid_request');
+    }
+
+    const timeout = parseInt(process.env.REQUEST_TIMEOUT || '30000');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const requestStartTime = Date.now();
+
+      // Build Google Custom Search API URL
+      const params = new URLSearchParams({
+        key: keyConfig.key,
+        cx: keyConfig.cseId,
+        q: keyword,
+        num: Math.min(options.maxResults || 10, 10).toString(), // Google Custom Search max is 10 per request
+        gl: options.country.toLowerCase(), // Country code
+        hl: options.language?.toLowerCase() || 'en', // Language
+        safe: 'off'
+      });
+
+      // Add location parameters if available
+      if (options.city) {
+        params.set('q', `${keyword} ${options.city}${options.state ? ', ' + options.state : ''}`);
+      }
+
+      const url = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
+      
+      logger.info(`🔍 Requesting Google Custom Search for "${keyword}" (country: ${options.country})`);
+
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+
+      clearTimeout(timeoutId);
+      const responseTime = Date.now();
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new SerpApiError(
+          `HTTP ${response.status}: ${errorText || response.statusText}`,
+          response.status === 429 ? 'rate_limited' : response.status === 403 ? 'invalid_request' : 'network_error',
+          response.status,
+          { url, errorText }
+        );
+      }
+
+      const data: IGoogleCustomSearchResponse = await response.json();
+
+      if (data.error) {
+        throw new SerpApiError(
+          `Google Custom Search Error: ${data.error.message}`,
+          'parse_error',
+          data.error.code,
+          { googleError: data.error }
+        );
+      }
+
+      if (!data.searchInformation) {
+        throw new SerpApiError(
+          'Invalid response from Google Custom Search: missing search information',
+          'parse_error',
+          undefined,
+          { data }
+        );
+      }
+
+      return this.parseGoogleCustomSearchResults(keyword, data, options, {
+        requestTimestamp: new Date(requestStartTime),
+        responseTimestamp: new Date(responseTime),
+        processingTime: responseTime - requestStartTime,
+        apiKeyUsed: keyConfig.id
+      });
+
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if ((error as any).name === 'AbortError') {
+        throw new SerpApiError(`Request timeout after ${timeout}ms`, 'timeout', undefined, { timeout });
+      }
+      throw error;
+    }
+  }
+
+  private parseSearchResults(
+    keyword: string, 
+    data: ISerpApiResponse, 
+    options: ISearchOptions,
+    requestMetadata: Partial<ISearchMetadata>
+  ): ISearchResult {
     const organicResults = data.organic_results || [];
     const cleanDomain = this.extractDomain(options.domain);
     const searchInfo = data.search_information || {};
@@ -334,30 +595,202 @@ export class SerpApiPoolManager {
     let title = '';
     let description = '';
     let foundMatch = false;
+    let positionSource: PositionSource = 'unknown';
+    let arrayIndexPosition: number | undefined;
+    const warnings: string[] = [];
 
-    logger.debug(`Parsing ${organicResults.length} organic results for domain: ${cleanDomain}`);
+    logger.debug(`🔍 Parsing ${organicResults.length} organic results for domain: ${cleanDomain}`);
+    
+    // Enhanced debug logging - Check position field coverage
+    const resultsWithPosition = organicResults.filter(r => r.position && r.position > 0);
+    logger.debug(`� Results with position field: ${resultsWithPosition.length}/${organicResults.length}`);
 
-    // Search through organic results for domain match
+    if (organicResults.length > 0 && organicResults.length <= 10) {
+      logger.debug(`📋 All results with positions:`);
+      organicResults.forEach((r: ISerpApiOrganicResult, idx: number) => {
+        logger.debug(`  [Array:${idx + 1}] [Pos:${r.position || 'MISSING'}] ${this.extractDomain(r.link || '')} - ${r.title?.substring(0, 50)}`);
+      });
+    } else if (organicResults.length > 0) {
+      logger.debug(`📋 First 5 results with positions:`);
+      organicResults.slice(0, 5).forEach((r: ISerpApiOrganicResult, idx: number) => {
+        logger.debug(`  [Array:${idx + 1}] [Pos:${r.position || 'MISSING'}] ${this.extractDomain(r.link || '')} - ${r.title?.substring(0, 50)}`);
+      });
+    }
+    
+    // Detect SERP features
+    const serpFeatures = this.detectSerpFeatures(data);
+    logger.debug(`📋 SERP Features detected: ${serpFeatures.map(f => `${f.type}(${f.count || 1})`).join(', ')}`);
+
+    // Log target domain for debugging
+    logger.info(`🎯 Target domain: "${cleanDomain}" (from options.domain: "${options.domain}")`);
+    
+    // Log ALL organic results with their domains for debugging
+    logger.info(`📋 All ${organicResults.length} organic results:`);
+    organicResults.forEach((r: ISerpApiOrganicResult, idx: number) => {
+      const resultDomain = this.extractDomain(r.link || '');
+      logger.info(`  [${idx + 1}] Pos:${r.position || 'N/A'} | Domain: "${resultDomain}" | URL: ${r.link}`);
+    });
+
+    // Search through organic results for domain match - Find best match with position field
+    let bestMatch: {
+      result: ISerpApiOrganicResult;
+      index: number;
+      domainMatch: IDomainMatchResult;
+    } | null = null;
+
     for (let i = 0; i < organicResults.length; i++) {
       const result = organicResults[i];
       if (result.link) {
         const resultDomain = this.extractDomain(result.link);
+        const domainMatch = this.domainsMatch(resultDomain, cleanDomain);
+        
+        // Only log when we find a match to reduce noise
+        if (domainMatch.matched) {
+          logger.info(`🔍 Found potential match at index ${i + 1}: "${resultDomain}" vs "${cleanDomain}" (type: ${domainMatch.matchType}, confidence: ${domainMatch.confidence}%, has position: ${!!result.position})`);
+        }
 
-        if (this.domainsMatch(resultDomain, cleanDomain)) {
-          position = result.position || (i + 1);
-          url = result.link;
-          title = result.title || '';
-          description = result.snippet || result.rich_snippet?.top?.detected_extensions?.description || '';
-          foundMatch = true;
-          logger.debug(`✅ Found domain match at position ${position}: ${resultDomain}`);
-          break;
+        if (domainMatch.matched) {
+          // Keep first match, but prefer one with valid position field
+          if (!bestMatch || (result.position && !bestMatch.result.position)) {
+            bestMatch = { result, index: i, domainMatch };
+            logger.info(`✅ Selected as best match (has position field: ${!!result.position})`);
+          }
+          
+          // If we found a match with valid position, we can stop
+          if (result.position && result.position > 0) {
+            logger.info(`✅ Found match with valid position ${result.position}, stopping search`);
+            break;
+          }
         }
       }
     }
 
-    if (!foundMatch) {
-      logger.debug(`❌ Domain ${cleanDomain} not found in top ${organicResults.length} results`);
+    if (bestMatch) {
+      const { result, index, domainMatch } = bestMatch;
+      foundMatch = true;
+      arrayIndexPosition = index + 1;
+      
+      if (result.position && result.position > 0) {
+        position = result.position;
+        positionSource = 'serpapi_position';
+        
+        // Position verification logging
+        logger.info(`✅ Position verification:`);
+        logger.info(`   - SerpAPI position field: ${position}`);
+        logger.info(`   - Array index position: ${arrayIndexPosition}`);
+        logger.info(`   - Difference: ${Math.abs(position - arrayIndexPosition)}`);
+        logger.info(`   - SERP features count: ${serpFeatures.length}`);
+        
+        const positionDifference = Math.abs(position - arrayIndexPosition);
+        if (positionDifference > 3) {
+          warnings.push(`Large discrepancy: SerpAPI position ${position} vs array index ${arrayIndexPosition}. This indicates SERP features affecting position.`);
+          logger.warn(`⚠️ Position discrepancy detected: SerpAPI=${position}, ArrayIndex=${arrayIndexPosition}, Difference=${positionDifference}`);
+        }
+      } else {
+        // Position field is missing - use SERP feature offset calculation
+        const serpFeatureOffset = this.calculateSerpFeatureOffset(data, index);
+        const adjustedPosition = arrayIndexPosition + serpFeatureOffset;
+        
+        position = adjustedPosition;
+        positionSource = 'array_index_fallback';
+        
+        warnings.push(`SerpAPI position field missing. Using array index ${arrayIndexPosition} + SERP feature offset ${serpFeatureOffset} = estimated position ${position}.`);
+        logger.warn(`⚠️ WARNING: SerpAPI position field missing! Using calculated position:`);
+        logger.warn(`   - Array index: ${arrayIndexPosition}`);
+        logger.warn(`   - SERP feature offset: ${serpFeatureOffset}`);
+        logger.warn(`   - Estimated position: ${position}`);
+        logger.error(`❌ CRITICAL: SerpAPI position field missing for ${this.extractDomain(result.link)}! Result data: ${JSON.stringify(result, null, 2)}`);
+      }
+      
+      url = result.link;
+      title = result.title || '';
+      description = result.snippet || result.rich_snippet?.top?.detected_extensions?.description || '';
+      
+      logger.info(`✅ MATCH FOUND! Domain: ${this.extractDomain(result.link)} (Match type: ${domainMatch.matchType}, Confidence: ${domainMatch.confidence}%) | Position: ${position} | Source: ${positionSource} | URL: ${url}`);
     }
+
+
+    if (!foundMatch) {
+      logger.warn(`❌ Domain ${cleanDomain} NOT found in ${organicResults.length} results`);
+      logger.warn(`📋 ALL result domains for debugging:`);
+      organicResults.forEach((r: ISerpApiOrganicResult, idx: number) => {
+        const resultDomain = this.extractDomain(r.link || '');
+        logger.warn(`   [${idx + 1}] Pos:${r.position || 'N/A'} | "${resultDomain}" | ${r.link}`);
+      });
+      
+      // Also check if we should have requested more results
+      if (organicResults.length >= 90) {
+        logger.error(`⚠️ CRITICAL: Received ${organicResults.length} results (near max). Domain may be ranked beyond visible results. Consider increasing maxResults.`);
+      }
+    }
+
+    // Calculate position confidence
+    const confidence = this.calculatePositionConfidence(
+      positionSource,
+      foundMatch,
+      serpFeatures,
+      organicResults.length,
+      warnings
+    );
+
+    // Build position validation object
+    const positionValidation: IPositionValidation = {
+      originalPosition: position,
+      positionSource,
+      confidence,
+      serpFeatures,
+      organicResultsCount: organicResults.length,
+      totalResultsInSerp: this.calculateTotalSerpResults(data),
+      validationMethod: positionSource === 'serpapi_position' ? 'serpapi_trusted' : 
+                        positionSource === 'array_index_fallback' ? 'fallback_used' : 'unverified',
+      warnings,
+      arrayIndexPosition
+    };
+
+    // Enhanced verification mode
+    if (options.verificationMode && foundMatch && position) {
+      const verificationResult = this.verifyPosition(position, arrayIndexPosition, serpFeatures, organicResults.length);
+      positionValidation.verifiedPosition = verificationResult.verifiedPosition;
+      positionValidation.discrepancy = verificationResult.discrepancy;
+      if (verificationResult.warning) {
+        positionValidation.warnings.push(verificationResult.warning);
+      }
+    }
+
+    // Build search metadata
+    const searchMetadata: ISearchMetadata = {
+      searchTime: data.search_metadata?.total_time_taken?.toString(),
+      searchId: data.search_metadata?.id,
+      location: data.search_parameters?.location || options.city || options.state || options.country,
+      device: options.device || 'desktop',
+      searchEngine: options.searchEngine || 'google',
+      cacheUsed: false,
+      rawParams: Object.fromEntries(new URLSearchParams({
+        q: keyword,
+        gl: options.country,
+        hl: options.language || 'en',
+        num: String(options.maxResults || 100)
+      })),
+      ...requestMetadata
+    };
+
+    // Collect competitor URLs (top 10)
+    const competitorUrls = organicResults
+      .slice(0, 10)
+      .filter(r => r.link && r.position)
+      .map(r => ({
+        position: r.position,
+        url: r.link,
+        domain: this.extractDomain(r.link),
+        title: r.title || ''
+      }));
+
+    // Determine result quality
+    const resultQuality = {
+      positionReliability: confidence >= 90 ? 'high' as const : confidence >= 70 ? 'medium' as const : 'low' as const,
+      dataFreshness: 'realtime' as const,
+      serpComplexity: serpFeatures.length > 3 ? 'complex' as const : serpFeatures.length > 1 ? 'moderate' as const : 'simple' as const
+    };
 
     return {
       keyword: keyword.trim(),
@@ -373,8 +806,365 @@ export class SerpApiPoolManager {
       totalResults: this.parseTotalResults(searchInfo.total_results),
       searchedResults: organicResults.length,
       timestamp: new Date(),
-      found: foundMatch
+      found: foundMatch,
+      positionValidation,
+      searchMetadata,
+      rawSerpData: {
+        organic_results: organicResults,
+        ads: data.ads,
+        search_information: data.search_information,
+        search_parameters: data.search_parameters,
+        serpapi_pagination: data.serpapi_pagination
+      },
+      competitorUrls,
+      resultQuality
     };
+  }
+
+  private parseGoogleCustomSearchResults(
+    keyword: string,
+    data: IGoogleCustomSearchResponse,
+    options: ISearchOptions,
+    requestMetadata: Partial<ISearchMetadata>
+  ): ISearchResult {
+    const items = data.items || [];
+    const searchInfo = data.searchInformation;
+
+    logger.info(`📊 Google Custom Search returned ${items.length} results for "${keyword}"`);
+
+    // Clean and normalize target domain
+    const cleanDomain = this.extractDomain(options.domain);
+    
+    // Log target domain for debugging
+    logger.info(`🎯 Target domain: "${cleanDomain}" (from options.domain: "${options.domain}")`);
+    
+    // Log ALL results with their domains for debugging
+    logger.info(`📋 All ${items.length} Google Custom Search results:`);
+    items.forEach((item: IGoogleCustomSearchItem, idx: number) => {
+      const resultDomain = this.extractDomain(item.link || '');
+      logger.info(`  [${idx + 1}] Domain: "${resultDomain}" | URL: ${item.link}`);
+    });
+
+    // Search through items for domain match
+    let bestMatch: {
+      item: IGoogleCustomSearchItem;
+      index: number;
+      domainMatch: IDomainMatchResult;
+    } | null = null;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.link) {
+        const resultDomain = this.extractDomain(item.link);
+        const domainMatch = this.domainsMatch(resultDomain, cleanDomain);
+        
+        // Only log when we find a match to reduce noise
+        if (domainMatch.matched) {
+          logger.info(`🔍 Found match at index ${i + 1}: "${resultDomain}" vs "${cleanDomain}" (type: ${domainMatch.matchType}, confidence: ${domainMatch.confidence}%)`);
+          bestMatch = { item, index: i, domainMatch };
+          break; // Take first match
+        }
+      }
+    }
+
+    let position: number | null = null;
+    let url = '';
+    let title = '';
+    let description = '';
+    let foundMatch = false;
+    let positionSource: PositionSource = 'unknown';
+    let confidence = 0;
+    const warnings: string[] = [];
+
+    if (bestMatch) {
+      foundMatch = true;
+      position = bestMatch.index + 1; // Google Custom Search uses 0-based index
+      positionSource = 'array_index_fallback';
+      url = bestMatch.item.link || '';
+      title = bestMatch.item.title || '';
+      description = bestMatch.item.snippet || '';
+      confidence = bestMatch.domainMatch.confidence;
+
+      logger.info(`✅ Match found at position ${position} (array index ${bestMatch.index})`);
+      logger.info(`   Match type: ${bestMatch.domainMatch.matchType}, Confidence: ${confidence}%`);
+      logger.info(`   URL: ${url}`);
+      logger.info(`   Title: ${title.substring(0, 60)}...`);
+    } else {
+      logger.warn(`❌ Domain "${cleanDomain}" NOT FOUND in Google Custom Search results`);
+      logger.warn(`   Searched through ${items.length} results`);
+      logger.warn(`   Consider checking: domain spelling, location targeting, or expanding search results`);
+    }
+
+    // Calculate position with any SERP feature adjustments (Google Custom Search typically has fewer features)
+    const serpFeatures: ISerpFeature[] = []; // Google Custom Search doesn't provide SERP features in the same way
+    const arrayIndexPosition: number | undefined = bestMatch ? bestMatch.index + 1 : undefined;
+
+    // Build position validation object
+    const positionValidation: IPositionValidation = {
+      originalPosition: position,
+      positionSource,
+      confidence,
+      serpFeatures,
+      organicResultsCount: items.length,
+      totalResultsInSerp: items.length,
+      validationMethod: 'fallback_used',
+      warnings,
+      arrayIndexPosition
+    };
+
+    // Build search metadata
+    const searchMetadata: ISearchMetadata = {
+      searchTime: searchInfo.searchTime?.toString(),
+      searchId: undefined,
+      location: options.city || options.state || options.country,
+      device: options.device || 'desktop',
+      searchEngine: options.searchEngine || 'google',
+      cacheUsed: false,
+      rawParams: Object.fromEntries(new URLSearchParams({
+        q: keyword,
+        gl: options.country,
+        hl: options.language || 'en',
+        num: String(options.maxResults || 10)
+      })),
+      ...requestMetadata
+    };
+
+    // Collect competitor URLs (top 10)
+    const competitorUrls = items
+      .slice(0, 10)
+      .map((item, idx) => ({
+        position: idx + 1,
+        url: item.link || '',
+        domain: this.extractDomain(item.link || ''),
+        title: item.title || ''
+      }));
+
+    // Determine result quality
+    const resultQuality = {
+      positionReliability: confidence >= 90 ? 'high' as const : confidence >= 70 ? 'medium' as const : 'low' as const,
+      dataFreshness: 'realtime' as const,
+      serpComplexity: 'simple' as const // Google Custom Search has simpler SERP
+    };
+
+    return {
+      keyword: keyword.trim(),
+      domain: options.domain,
+      position,
+      url,
+      title,
+      description,
+      country: options.country.toUpperCase(),
+      city: options.city?.trim() || '',
+      state: options.state?.trim() || '',
+      postalCode: options.postalCode?.trim() || '',
+      totalResults: parseInt(searchInfo.totalResults || '0'),
+      searchedResults: items.length,
+      timestamp: new Date(),
+      found: foundMatch,
+      positionValidation,
+      searchMetadata,
+      rawSerpData: {
+        googleCustomSearch: {
+          items: items,
+          searchInformation: data.searchInformation,
+          queries: data.queries
+        }
+      },
+      competitorUrls,
+      resultQuality
+    };
+  }
+
+  private detectSerpFeatures(data: ISerpApiResponse): ISerpFeature[] {
+    const features: ISerpFeature[] = [];
+
+    if (data.ads && data.ads.length > 0) {
+      features.push({
+        type: 'ads',
+        count: data.ads.length,
+        position: 1 // Ads typically appear at top
+      });
+    }
+
+    if (data.answer_box) {
+      features.push({ type: 'featured_snippet', position: 1 });
+    }
+
+    if (data.knowledge_graph) {
+      features.push({ type: 'knowledge_panel' });
+    }
+
+    if (data.local_results) {
+      features.push({
+        type: 'local_pack',
+        count: Array.isArray(data.local_results) ? data.local_results.length : 1
+      });
+    }
+
+    if (data.inline_images && data.inline_images.length > 0) {
+      features.push({ type: 'images', count: data.inline_images.length });
+    }
+
+    if (data.inline_videos && data.inline_videos.length > 0) {
+      features.push({ type: 'videos', count: data.inline_videos.length });
+    }
+
+    if (data.related_searches && data.related_searches.length > 0) {
+      features.push({ type: 'related_searches', count: data.related_searches.length });
+    }
+
+    if (data.top_stories) {
+      features.push({ type: 'other', count: 1 });
+    }
+
+    // Check for PAA (People Also Ask) in organic results
+    const organicResults = data.organic_results || [];
+    const paaCount = organicResults.filter(r => 
+      r.title?.toLowerCase().includes('people also ask') || 
+      (r as any).type === 'people_also_ask'
+    ).length;
+    
+    if (paaCount > 0) {
+      features.push({ type: 'people_also_ask', count: paaCount });
+    }
+
+    return features;
+  }
+
+  /**
+   * Calculate position offset caused by SERP features (ads, snippets, etc.)
+   * This adjusts array index to approximate actual SERP position
+   */
+  private calculateSerpFeatureOffset(data: ISerpApiResponse, arrayIndex: number): number {
+    let offset = 0;
+    
+    // Count ads at the top (typically 3-4 ads above organic results)
+    if (data.ads && data.ads.length > 0) {
+      offset += data.ads.length;
+      logger.debug(`  + ${data.ads.length} ad positions`);
+    }
+    
+    // Featured snippet takes position 0/1
+    if (data.answer_box) {
+      offset += 1;
+      logger.debug(`  + 1 featured snippet position`);
+    }
+    
+    // Local pack typically shows 3 results
+    if (data.local_results) {
+      const localCount = Array.isArray(data.local_results) ? data.local_results.length : 3;
+      offset += localCount;
+      logger.debug(`  + ${localCount} local pack positions`);
+    }
+    
+    // People Also Ask boxes (can appear anywhere, but often near top)
+    const organicResults = data.organic_results || [];
+    let paaCount = 0;
+    for (let i = 0; i < arrayIndex && i < organicResults.length; i++) {
+      const result = organicResults[i];
+      if (result.title?.toLowerCase().includes('people also ask') || (result as any).type === 'people_also_ask') {
+        paaCount++;
+      }
+    }
+    if (paaCount > 0) {
+      offset += paaCount;
+      logger.debug(`  + ${paaCount} PAA boxes before position ${arrayIndex + 1}`);
+    }
+    
+    // Knowledge panel (usually on right side, but can affect mobile positions)
+    if (data.knowledge_graph) {
+      // Knowledge panels don't typically offset position, but log it
+      logger.debug(`  (Knowledge panel present but doesn't offset position)`);
+    }
+    
+    logger.info(`📊 SERP Feature Offset Calculation: Array index ${arrayIndex + 1} + ${offset} features = Estimated position ${arrayIndex + 1 + offset}`);
+    
+    return offset;
+  }
+
+  private calculateTotalSerpResults(data: ISerpApiResponse): number {
+    let total = (data.organic_results || []).length;
+    
+    if (data.ads) total += data.ads.length;
+    if (data.inline_images) total += data.inline_images.length;
+    if (data.inline_videos) total += data.inline_videos.length;
+    if (data.answer_box) total += 1;
+    if (data.knowledge_graph) total += 1;
+    if (data.local_results) {
+      total += Array.isArray(data.local_results) ? data.local_results.length : 1;
+    }
+    
+    return total;
+  }
+
+  private calculatePositionConfidence(
+    positionSource: PositionSource,
+    found: boolean,
+    serpFeatures: ISerpFeature[],
+    organicCount: number,
+    warnings: string[]
+  ): number {
+    if (!found) return 0;
+
+    let confidence = 100;
+
+    // Reduce confidence based on position source
+    if (positionSource === 'array_index_fallback') {
+      confidence -= 30; // Major penalty for using array index
+    } else if (positionSource === 'unknown') {
+      confidence -= 50;
+    }
+
+    // Reduce confidence based on SERP complexity
+    const complexityPenalty = Math.min(serpFeatures.length * 5, 20);
+    confidence -= complexityPenalty;
+
+    // Reduce confidence if few organic results
+    if (organicCount < 10) {
+      confidence -= 10;
+    }
+
+    // Reduce confidence for warnings
+    confidence -= Math.min(warnings.length * 5, 15);
+
+    return Math.max(0, Math.round(confidence));
+  }
+
+  private verifyPosition(
+    position: number | null,
+    arrayIndexPosition: number | undefined,
+    serpFeatures: ISerpFeature[],
+    organicCount: number
+  ): {
+    verifiedPosition: number | null;
+    discrepancy?: number;
+    warning?: string;
+  } {
+    if (!position || !arrayIndexPosition) {
+      return { verifiedPosition: position };
+    }
+
+    const discrepancy = Math.abs(position - arrayIndexPosition);
+
+    // Expected discrepancy based on SERP features
+    const expectedDiscrepancy = serpFeatures.reduce((sum, feature) => {
+      if (feature.type === 'ads') return sum + (feature.count || 1);
+      if (feature.type === 'featured_snippet') return sum + 1;
+      if (feature.type === 'local_pack') return sum + 1;
+      return sum;
+    }, 0);
+
+    if (discrepancy <= expectedDiscrepancy + 2) {
+      // Position is verified as reasonable
+      return { verifiedPosition: position, discrepancy };
+    } else {
+      // Significant discrepancy detected
+      return {
+        verifiedPosition: position,
+        discrepancy,
+        warning: `Significant position discrepancy: ${discrepancy} positions difference (expected ~${expectedDiscrepancy} based on SERP features)`
+      };
+    }
   }
 
   private parseTotalResults(totalResults: any): number {
@@ -383,7 +1173,6 @@ export class SerpApiPoolManager {
     }
     
     if (typeof totalResults === 'string') {
-      // Remove non-digit characters and parse
       return parseInt(totalResults.replace(/[^\d]/g, '') || '0') || 0;
     }
     
@@ -392,39 +1181,163 @@ export class SerpApiPoolManager {
 
   private extractDomain(url: string): string {
     try {
+      if (!url) return '';
+      
       // Remove protocol
       let domain = url.replace(/^https?:\/\//, '');
-      // Remove www
-      domain = domain.replace(/^www\./, '');
-      // Remove path, query, and fragment
+      
+      // Remove www, m, mobile prefixes
+      domain = domain.replace(/^(www\d*|m|mobile)\./, '');
+      
+      // Remove port
+      domain = domain.split(':')[0];
+      
+      // Get just the domain part (before path, query, hash)
       domain = domain.split('/')[0].split('?')[0].split('#')[0];
-      // Convert to lowercase
-      return domain.toLowerCase().trim();
+      
+      // Clean and lowercase
+      domain = domain.toLowerCase().trim();
+      
+      return domain;
     } catch (error) {
-      logger.warn(`Error extracting domain from ${url}:`, error);
-      return url.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0].toLowerCase().trim();
+      logger.warn(`⚠️ Error extracting domain from "${url}":`, error);
+      const fallback = url.replace(/^https?:\/\//, '').replace(/^(www\d*|m|mobile)\./, '').split('/')[0].toLowerCase().trim();
+      return fallback;
     }
   }
 
-  private domainsMatch(domain1: string, domain2: string): boolean {
-    if (!domain1 || !domain2) return false;
+  private domainsMatch(domain1: string, domain2: string): IDomainMatchResult {
+    if (!domain1 || !domain2) {
+      return {
+        matched: false,
+        matchType: 'none',
+        domain1,
+        domain2,
+        confidence: 0
+      };
+    }
     
     const d1 = domain1.toLowerCase().trim();
     const d2 = domain2.toLowerCase().trim();
     
-    // Exact match
-    if (d1 === d2) return true;
+    // 1. Exact match (100% confidence)
+    if (d1 === d2) {
+      logger.debug(`✅ domainsMatch: EXACT - "${d1}" === "${d2}"`);
+      return {
+        matched: true,
+        matchType: 'exact',
+        domain1: d1,
+        domain2: d2,
+        confidence: 100
+      };
+    }
     
-    // Remove common prefixes/suffixes for comparison
-    const normalize = (d: string) => d.replace(/^(www|m|mobile)\./, '').replace(/\/$/, '');
+    // 2. Normalize by removing common prefixes
+    const normalize = (d: string) => {
+      return d
+        .replace(/^(www\d*|m|mobile)\./, '')
+        .replace(/\/$/, '')
+        .toLowerCase()
+        .trim();
+    };
+    
+    // 3. Singularize for plural/singular matching
+    const singularize = (d: string) => {
+      return d
+        .replace(/ies$/, 'y')    // companies -> company
+        .replace(/es$/, '')       // boxes -> box
+        .replace(/s$/, '');       // cats -> cat
+    };
+    
     const n1 = normalize(d1);
     const n2 = normalize(d2);
     
-    if (n1 === n2) return true;
+    if (n1 === n2) {
+      logger.debug(`✅ domainsMatch: NORMALIZED - "${n1}" === "${n2}" (from "${d1}" and "${d2}")`);
+      return {
+        matched: true,
+        matchType: 'normalized',
+        domain1: d1,
+        domain2: d2,
+        normalizedDomain1: n1,
+        normalizedDomain2: n2,
+        confidence: 95
+      };
+    }
     
-    // Check if one is subdomain of another
-    return d1.includes(d2) || d2.includes(d1) || 
-           d1.endsWith(`.${d2}`) || d2.endsWith(`.${d1}`);
+    // 3.5. Check singular/plural variations
+    const s1 = singularize(n1);
+    const s2 = singularize(n2);
+    
+    if (s1 === s2 && s1 !== n1 || s1 !== n2) {
+      logger.debug(`✅ domainsMatch: SINGULAR_PLURAL - "${s1}" (from "${n1}" and "${n2}")`);
+      return {
+        matched: true,
+        matchType: 'normalized',
+        domain1: d1,
+        domain2: d2,
+        normalizedDomain1: n1,
+        normalizedDomain2: n2,
+        confidence: 93
+      };
+    }
+    
+    // 4. Check for subdomain match (e.g., blog.example.com should match example.com)
+    const parts1 = n1.split('.');
+    const parts2 = n2.split('.');
+    
+    const getMainDomain = (parts: string[]) => {
+      if (parts.length >= 2) {
+        return parts.slice(-2).join('.');
+      }
+      return parts.join('.');
+    };
+    
+    const main1 = getMainDomain(parts1);
+    const main2 = getMainDomain(parts2);
+    
+    if (main1 === main2 && main1.length > 0) {
+      // Check if one is a subdomain of the other
+      const isSubdomain = n1.endsWith(`.${n2}`) || n2.endsWith(`.${n1}`);
+      
+      logger.debug(`✅ domainsMatch: ${isSubdomain ? 'SUBDOMAIN' : 'MAIN_DOMAIN'} - main="${main1}" (from "${n1}" and "${n2}")`);
+      
+      return {
+        matched: true,
+        matchType: isSubdomain ? 'subdomain' : 'main_domain',
+        domain1: d1,
+        domain2: d2,
+        normalizedDomain1: n1,
+        normalizedDomain2: n2,
+        confidence: isSubdomain ? 85 : 90
+      };
+    }
+    
+    // 5. Check if one domain contains the other (partial match)
+    if (d1.includes(d2) || d2.includes(d1)) {
+      logger.debug(`⚠️ domainsMatch: PARTIAL - "${d1}" contains "${d2}" or vice versa`);
+      return {
+        matched: true,
+        matchType: 'subdomain',
+        domain1: d1,
+        domain2: d2,
+        normalizedDomain1: n1,
+        normalizedDomain2: n2,
+        confidence: 75
+      };
+    }
+    
+    // No match - don't log every comparison to avoid spam
+    
+    return {
+      matched: false,
+      matchType: 'none',
+      domain1: d1,
+      domain2: d2,
+      normalizedDomain1: n1,
+      normalizedDomain2: n2,
+      confidence: 0
+    };
   }
 
   private async updateKeyUsage(keyId: string, success: boolean): Promise<void> {
@@ -439,24 +1352,20 @@ export class SerpApiPoolManager {
     if (success) {
       keyConfig.usedToday++;
       keyConfig.usedThisMonth++;
-      // Weighted success rate calculation (more recent results have more weight)
       keyConfig.successRate = Math.min(100, (keyConfig.successRate * 0.95) + (100 * 0.05));
     } else {
       keyConfig.errorCount++;
-      // Penalize success rate for errors
       keyConfig.successRate = Math.max(0, (keyConfig.successRate * 0.95) + (0 * 0.05));
     }
 
     keyConfig.lastUsed = new Date();
     keyConfig.updatedAt = new Date();
 
-    // Check if key should be marked as exhausted
     if (keyConfig.usedToday >= keyConfig.dailyLimit) {
       keyConfig.status = 'exhausted';
       logger.warn(`Key ${keyId} has reached daily limit: ${keyConfig.usedToday}/${keyConfig.dailyLimit}`);
     }
 
-    // Update in database asynchronously
     setImmediate(async () => {
       try {
         await ApiKeyModel.findOneAndUpdate(
@@ -510,7 +1419,7 @@ export class SerpApiPoolManager {
   private async saveSearchResult(result: ISearchResult): Promise<void> {
     try {
       await SearchResultModel.create(result);
-      logger.debug(`Saved search result: ${result.keyword} -> ${result.position || 'Not Found'}`);
+      logger.debug(`Saved search result: ${result.keyword} -> ${result.position || 'Not Found'} (Confidence: ${result.positionValidation.confidence}%)`);
     } catch (error) {
       logger.error('Failed to save search result to database:', error);
     }
@@ -535,29 +1444,12 @@ export class SerpApiPoolManager {
            message.includes('requests per second');
   }
 
-  public getKeyStats(): { 
-    total: number; 
-    active: number; 
-    exhausted: number; 
-    paused: number; 
-    totalUsageToday: number; 
-    totalCapacity: number;
-    hasEnvironmentKeys: boolean;
-    usagePercentage: number;
-    remainingCapacity: number;
-    estimatedTimeToExhaustion?: string;
-    criticalKeys: number;
-    warningKeys: number;
-    totalUsageThisMonth: number;
-    totalMonthlyCapacity: number;
-    monthlyUsagePercentage: number;
-  } {
+  public getKeyStats(): IPoolStats {
     const totalUsageToday = this.apiKeys.reduce((sum, k) => sum + k.usedToday, 0);
     const totalCapacity = this.apiKeys.reduce((sum, k) => sum + k.dailyLimit, 0);
     const remainingCapacity = totalCapacity - totalUsageToday;
     const usagePercentage = totalCapacity > 0 ? Math.round((totalUsageToday / totalCapacity) * 100) : 0;
     
-    // Count keys in different warning states
     const criticalKeys = this.apiKeys.filter(k => 
       (k.usedToday / k.dailyLimit) >= 0.9 && k.status === 'active'
     ).length;
@@ -566,12 +1458,11 @@ export class SerpApiPoolManager {
       (k.usedToday / k.dailyLimit) >= 0.75 && (k.usedToday / k.dailyLimit) < 0.9 && k.status === 'active'
     ).length;
 
-    // Estimate time to exhaustion based on current usage pattern
     let estimatedTimeToExhaustion: string | undefined;
     if (remainingCapacity > 0 && totalUsageToday > 0) {
       const hoursElapsed = new Date().getHours() + (new Date().getMinutes() / 60);
       if (hoursElapsed > 0) {
-        const currentRate = totalUsageToday / hoursElapsed; // requests per hour
+        const currentRate = totalUsageToday / hoursElapsed;
         const hoursToExhaustion = remainingCapacity / currentRate;
         
         if (hoursToExhaustion < 24) {
@@ -595,19 +1486,17 @@ export class SerpApiPoolManager {
       estimatedTimeToExhaustion,
       criticalKeys,
       warningKeys,
-      // Add monthly usage tracking
       totalUsageThisMonth: this.apiKeys.reduce((sum, k) => sum + k.usedThisMonth, 0),
       totalMonthlyCapacity: this.apiKeys.reduce((sum, k) => sum + k.monthlyLimit, 0),
       monthlyUsagePercentage: totalCapacity > 0 ? Math.round((this.apiKeys.reduce((sum, k) => sum + k.usedThisMonth, 0) / this.apiKeys.reduce((sum, k) => sum + k.monthlyLimit, 0)) * 100) : 0
     };
   }
 
-  public getDetailedKeyStats() {
+  public getDetailedKeyStats(): IKeyHealthStatus[] {
     return this.apiKeys.map(key => {
       const usagePercentage = Math.round((key.usedToday / key.dailyLimit) * 100);
       const remainingRequests = key.dailyLimit - key.usedToday;
       
-      // Determine health status
       let healthStatus: 'healthy' | 'warning' | 'critical' | 'exhausted';
       if (key.status === 'exhausted') {
         healthStatus = 'exhausted';
@@ -619,7 +1508,6 @@ export class SerpApiPoolManager {
         healthStatus = 'healthy';
       }
 
-      // Calculate monthly usage percentage
       const monthlyUsagePercentage = Math.round((key.usedThisMonth / key.monthlyLimit) * 100);
 
       return {
@@ -651,7 +1539,7 @@ export class SerpApiPoolManager {
     const hoursElapsed = new Date().getHours() + (new Date().getMinutes() / 60);
     if (hoursElapsed === 0) return null;
 
-    const currentRate = key.usedToday / hoursElapsed; // requests per hour
+    const currentRate = key.usedToday / hoursElapsed;
     const hoursToExhaustion = remainingRequests / currentRate;
     
     if (hoursToExhaustion < 1) {
@@ -659,7 +1547,7 @@ export class SerpApiPoolManager {
     } else if (hoursToExhaustion < 24) {
       return `${Math.round(hoursToExhaustion)} hours`;
     } else {
-      return null; // More than a day
+      return null;
     }
   }
 
@@ -671,13 +1559,12 @@ export class SerpApiPoolManager {
       if (key.usedToday > 0 || key.status === 'exhausted') {
         key.usedToday = 0;
         key.status = 'active';
-        key.errorCount = 0; // Reset daily errors
+        key.errorCount = 0;
         resetCount++;
       }
     }
 
     try {
-      // Reset in database
       await ApiKeyModel.updateMany({}, {
         usedToday: 0,
         status: 'active',
@@ -699,13 +1586,12 @@ export class SerpApiPoolManager {
         if (key.status === 'exhausted' && key.usedToday < key.dailyLimit) {
           key.status = 'active';
         }
-        key.errorCount = 0; // Reset monthly errors
+        key.errorCount = 0;
         logger.debug(`Reset monthly usage for key ${key.id}`);
       }
     }
 
     try {
-      // Reset in database
       await ApiKeyModel.updateMany({}, {
         usedThisMonth: 0,
         $set: {
@@ -719,13 +1605,11 @@ export class SerpApiPoolManager {
     }
   }
 
-  // Check if monthly reset is needed and perform it
   public async checkAndResetMonthlyUsage(): Promise<void> {
     const now = new Date();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
     
-    // Check each key to see if it needs monthly reset
     for (const key of this.apiKeys) {
       try {
         const existingKey = await ApiKeyModel.findOne({ keyId: key.id });
@@ -734,14 +1618,12 @@ export class SerpApiPoolManager {
           const lastResetMonth = lastReset.getMonth();
           const lastResetYear = lastReset.getFullYear();
           
-          // If we're in a new month, reset the usage
           if (currentMonth !== lastResetMonth || currentYear !== lastResetYear) {
             logger.info(`🗓️ Monthly reset needed for key ${key.id} (last reset: ${lastReset.toISOString()})`);
             await this.resetMonthlyUsage();
-            break; // Reset all keys at once
+            break;
           }
         } else {
-          // No reset record found, perform initial monthly reset
           await this.resetMonthlyUsage();
           break;
         }
@@ -761,7 +1643,7 @@ export class SerpApiPoolManager {
           domain: 'example.com',
           country: 'US'
         });
-        logger.info(`✅ Key ${key.id} is working`);
+        logger.info(`✅ Key ${key.id} is working (Position confidence: ${result.positionValidation.confidence}%)`);
       } catch (error) {
         logger.error(`❌ Key ${key.id} failed test: ${(error as Error).message}`);
         key.status = 'error';
@@ -769,11 +1651,10 @@ export class SerpApiPoolManager {
     }
   }
 
-  public async testUserApiKey(apiKey: string): Promise<{ valid: boolean; message: string; details?: any }> {
+  public async testUserApiKey(apiKey: string): Promise<IApiKeyTestResult> {
     try {
       logger.info(`🧪 Testing user-provided API key...`);
       
-      // Create a temporary key object for testing
       const tempKey: ISerpApiKey = {
         id: 'temp_user_key',
         key: apiKey.trim(),
@@ -790,7 +1671,6 @@ export class SerpApiPoolManager {
         updatedAt: new Date()
       };
 
-      // Make a test request using the provided API key
       const result = await this.makeRequest(tempKey, 'test query', {
         domain: 'example.com',
         country: 'US'
@@ -802,9 +1682,13 @@ export class SerpApiPoolManager {
         message: 'API key is valid and working',
         details: {
           totalResults: result.totalResults || 0,
-          responseTime: Date.now(),
+          responseTime: result.searchMetadata.processingTime,
           testKeyword: 'test query',
-          testDomain: 'example.com'
+          testDomain: 'example.com',
+          serpApiResponse: {
+            organicResultsCount: result.searchedResults,
+            positionConfidence: result.positionValidation.confidence
+          }
         }
       };
 
@@ -812,31 +1696,31 @@ export class SerpApiPoolManager {
       const errorMessage = (error as Error).message;
       logger.error(`❌ User API key test failed: ${errorMessage}`);
       
-      // Check for specific error types to provide better feedback
       if (this.isQuotaExceeded(error)) {
         return {
           valid: false,
           message: 'API key has reached its quota limit',
-          details: { error: 'quota_exceeded', errorMessage }
+          details: { errorType: 'quota_exceeded', errorMessage }
         };
       } else if (this.isRateLimited(error)) {
         return {
           valid: false,
           message: 'API key is being rate limited',
-          details: { error: 'rate_limited', errorMessage }
+          details: { errorType: 'rate_limited', errorMessage }
         };
       } else if (errorMessage.includes('401') || errorMessage.includes('unauthorized')) {
         return {
           valid: false,
           message: 'Invalid API key',
-          details: { error: 'unauthorized', errorMessage }
+          details: { errorType: 'unauthorized', errorMessage }
         };
       } else {
         return {
           valid: false,
           message: `API key test failed: ${errorMessage}`,
           details: {
-            error: errorMessage,
+            errorType: 'unknown',
+            errorMessage,
             testKeyword: 'test query',
             testDomain: 'example.com'
           }
@@ -845,37 +1729,73 @@ export class SerpApiPoolManager {
     }
   }
 
-  // Dynamic API Key Management Methods
-
-  public async addApiKey(apiKey: string, dailyLimit?: number, monthlyLimit?: number): Promise<{ success: boolean; message: string; keyId?: string }> {
+  public async addApiKey(apiKey: string, dailyLimit?: number, monthlyLimit?: number): Promise<IApiKeyAddResult> {
     try {
-      // First test if the API key is valid
-      const testResult = await this.testUserApiKey(apiKey);
-      if (!testResult.valid) {
+      if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length < 32) {
         return {
           success: false,
-          message: `Invalid API key: ${testResult.message}`
+          message: 'Invalid API key format. Key must be at least 32 characters long.'
         };
       }
 
-      // Check if key already exists
-      const existingKey = this.apiKeys.find(k => k.key === apiKey);
-      if (existingKey) {
-        return {
-          success: false,
-          message: 'API key already exists in the pool'
-        };
-      }
+      const trimmedKey = apiKey.trim();
 
-      // Generate unique ID
-      const keyId = `user_serpapi_${Date.now()}`;
+      const existingUserKey = this.apiKeys.find(k => 
+        k.key === trimmedKey && 
+        k.id.startsWith('user_serpapi_')
+      );
       
-      // Create new key configuration
+      if (existingUserKey) {
+        return {
+          success: false,
+          message: 'API key already exists in the pool',
+          keyId: existingUserKey.id
+        };
+      }
+
+      const existingEnvKey = this.apiKeys.find(k => 
+        k.key === trimmedKey && 
+        k.id.startsWith('serpapi_')
+      );
+
+      if (existingEnvKey) {
+        logger.info(`ℹ️ API key already exists as environment key ${existingEnvKey.id}, but adding as user key`);
+      }
+
+      if (!existingEnvKey) {
+        logger.info(`🧪 Testing new API key before adding to pool...`);
+        const testResult = await this.testUserApiKey(trimmedKey);
+        
+        if (!testResult.valid) {
+          if (testResult.message.toLowerCase().includes('rate limit') || 
+              testResult.message.toLowerCase().includes('too many requests')) {
+            return {
+              success: false,
+              message: 'Unable to validate API key due to rate limiting. Try again in a few minutes, or add the key directly to backend .env file.',
+              testResult
+            };
+          }
+          
+          return {
+            success: false,
+            message: `Invalid API key: ${testResult.message}`,
+            testResult
+          };
+        }
+        logger.info(`✅ API key validation successful`);
+      } else {
+        logger.info(`⏩ Skipping validation - key already validated as environment key`);
+      }
+
+      const timestamp = Date.now();
+      const keyId = `user_serpapi_${timestamp}`;
+      
       const newKey: ISerpApiKey = {
         id: keyId,
-        key: apiKey,
-        dailyLimit: dailyLimit || 250, // SerpAPI free tier default
-        monthlyLimit: monthlyLimit || 250, // SerpAPI free tier default
+        key: trimmedKey,
+        provider: 'serpapi',
+        dailyLimit: dailyLimit || 250,
+        monthlyLimit: monthlyLimit || 250,
         usedToday: 0,
         usedThisMonth: 0,
         status: 'active',
@@ -888,12 +1808,13 @@ export class SerpApiPoolManager {
         monthlyResetAt: new Date()
       };
 
-      // Add to memory pool
       this.apiKeys.push(newKey);
 
-      // Save to database
+      // Save to database with the actual API key and isUserAdded flag
       await ApiKeyModel.create({
         keyId: newKey.id,
+        apiKey: trimmedKey, // Store the actual API key
+        provider: 'serpapi',
         dailyLimit: newKey.dailyLimit,
         monthlyLimit: newKey.monthlyLimit,
         usedToday: 0,
@@ -902,28 +1823,42 @@ export class SerpApiPoolManager {
         priority: newKey.priority,
         errorCount: 0,
         successRate: 100,
-        monthlyResetAt: new Date()
+        monthlyResetAt: new Date(),
+        isUserAdded: true // Mark as user-added key
       });
 
-      logger.info(`✅ Successfully added new API key: ${keyId}`);
+      logger.info(`✅ Successfully added new API key: ${keyId} (Daily: ${newKey.dailyLimit}, Monthly: ${newKey.monthlyLimit})`);
+      
       return {
         success: true,
-        message: 'API key added successfully',
+        message: existingEnvKey 
+          ? 'API key added successfully (Note: This key also exists in environment variables)'
+          : 'API key added successfully',
         keyId: keyId
       };
 
     } catch (error) {
+      const errorMessage = (error as Error).message;
       logger.error('❌ Failed to add API key:', error);
+      
+      if (errorMessage.toLowerCase().includes('rate limit') || 
+          errorMessage.toLowerCase().includes('too many requests') ||
+          errorMessage.toLowerCase().includes('429')) {
+        return {
+          success: false,
+          message: 'Unable to validate API key due to rate limiting. Try again in a few minutes, or add the key directly to backend .env file.'
+        };
+      }
+      
       return {
         success: false,
-        message: `Failed to add API key: ${(error as Error).message}`
+        message: `Failed to add API key: ${errorMessage}`
       };
     }
   }
 
-  public async removeApiKey(keyId: string): Promise<{ success: boolean; message: string }> {
+  public async removeApiKey(keyId: string): Promise<IApiKeyRemoveResult> {
     try {
-      // Find the key in memory
       const keyIndex = this.apiKeys.findIndex(k => k.id === keyId);
       if (keyIndex === -1) {
         return {
@@ -932,16 +1867,14 @@ export class SerpApiPoolManager {
         };
       }
 
-      // Remove from memory
       this.apiKeys.splice(keyIndex, 1);
-
-      // Remove from database
       await ApiKeyModel.deleteOne({ keyId: keyId });
 
       logger.info(`✅ Successfully removed API key: ${keyId}`);
       return {
         success: true,
-        message: 'API key removed successfully'
+        message: 'API key removed successfully',
+        removedKeyId: keyId
       };
 
     } catch (error) {
@@ -953,9 +1886,8 @@ export class SerpApiPoolManager {
     }
   }
 
-  public async updateApiKey(keyId: string, updates: Partial<{ dailyLimit: number; monthlyLimit: number; priority: number }>): Promise<{ success: boolean; message: string }> {
+  public async updateApiKey(keyId: string, updates: Partial<{ dailyLimit: number; monthlyLimit: number; priority: number }>): Promise<IApiKeyUpdateResult> {
     try {
-      // Find the key in memory
       const key = this.apiKeys.find(k => k.id === keyId);
       if (!key) {
         return {
@@ -964,13 +1896,11 @@ export class SerpApiPoolManager {
         };
       }
 
-      // Update memory
       if (updates.dailyLimit !== undefined) key.dailyLimit = updates.dailyLimit;
       if (updates.monthlyLimit !== undefined) key.monthlyLimit = updates.monthlyLimit;
       if (updates.priority !== undefined) key.priority = updates.priority;
       key.updatedAt = new Date();
 
-      // Update database
       const updateData: any = { updatedAt: new Date() };
       if (updates.dailyLimit !== undefined) updateData.dailyLimit = updates.dailyLimit;
       if (updates.monthlyLimit !== undefined) updateData.monthlyLimit = updates.monthlyLimit;
@@ -981,7 +1911,13 @@ export class SerpApiPoolManager {
       logger.info(`✅ Successfully updated API key: ${keyId}`);
       return {
         success: true,
-        message: 'API key updated successfully'
+        message: 'API key updated successfully',
+        updatedKey: {
+          id: keyId,
+          dailyLimit: updates.dailyLimit,
+          monthlyLimit: updates.monthlyLimit,
+          priority: updates.priority
+        }
       };
 
     } catch (error) {
@@ -994,8 +1930,177 @@ export class SerpApiPoolManager {
   }
 
   public async refreshStats(): Promise<void> {
-    // This method can be called to refresh stats after dynamic changes
-    // It's mainly for future extensibility
     logger.debug('📊 Refreshing API pool statistics...');
+  }
+
+  /**
+   * Add a Google Custom Search API key
+   */
+  public async addGoogleCustomSearchKey(apiKey: string, cseId: string, dailyLimit?: number): Promise<IApiKeyAddResult> {
+    try {
+      if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length < 20) {
+        return {
+          success: false,
+          message: 'Invalid Google API key format. Key must be at least 20 characters long.'
+        };
+      }
+
+      if (!cseId || typeof cseId !== 'string') {
+        return {
+          success: false,
+          message: 'Custom Search Engine ID (CSE ID) is required for Google Custom Search.'
+        };
+      }
+
+      const trimmedKey = apiKey.trim();
+      const trimmedCseId = cseId.trim();
+
+      const existingKey = this.apiKeys.find(k => 
+        k.key === trimmedKey && 
+        k.provider === 'google_custom_search'
+      );
+      
+      if (existingKey) {
+        return {
+          success: false,
+          message: 'Google Custom Search API key already exists in the pool',
+          keyId: existingKey.id
+        };
+      }
+
+      // Test the key
+      logger.info(`🧪 Testing Google Custom Search API key...`);
+      const testResult = await this.testGoogleCustomSearchKey(trimmedKey, trimmedCseId);
+      
+      if (!testResult.valid) {
+        return {
+          success: false,
+          message: `Invalid Google Custom Search API key: ${testResult.message}`,
+          testResult
+        };
+      }
+      logger.info(`✅ Google Custom Search API key validation successful`);
+
+      const timestamp = Date.now();
+      const keyId = `user_google_cse_${timestamp}`;
+      
+      const newKey: ISerpApiKey = {
+        id: keyId,
+        key: trimmedKey,
+        provider: 'google_custom_search',
+        cseId: trimmedCseId,
+        dailyLimit: dailyLimit || 100, // Google Custom Search free tier: 100/day
+        monthlyLimit: 0, // Not applicable for Google Custom Search
+        usedToday: 0,
+        usedThisMonth: 0,
+        status: 'active',
+        priority: this.apiKeys.length + 1,
+        lastUsed: new Date(),
+        errorCount: 0,
+        successRate: 100,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        monthlyResetAt: new Date()
+      };
+
+      this.apiKeys.push(newKey);
+
+      // Save to database with the actual API key and isUserAdded flag
+      await ApiKeyModel.create({
+        keyId: newKey.id,
+        apiKey: trimmedKey, // Store the actual API key
+        provider: 'google_custom_search',
+        cseId: trimmedCseId, // Store the CSE ID
+        dailyLimit: newKey.dailyLimit,
+        monthlyLimit: newKey.monthlyLimit,
+        usedToday: 0,
+        usedThisMonth: 0,
+        status: 'active',
+        priority: newKey.priority,
+        errorCount: 0,
+        successRate: 100,
+        monthlyResetAt: new Date(),
+        isUserAdded: true // Mark as user-added key
+      });
+
+      logger.info(`✅ Successfully added Google Custom Search API key: ${keyId} (Daily: ${newKey.dailyLimit})`);
+      
+      return {
+        success: true,
+        message: 'Google Custom Search API key added successfully',
+        keyId: keyId
+      };
+
+    } catch (error) {
+      const errorMessage = (error as Error).message;
+      logger.error('❌ Failed to add Google Custom Search API key:', error);
+      
+      return {
+        success: false,
+        message: `Failed to add Google Custom Search API key: ${errorMessage}`
+      };
+    }
+  }
+
+  /**
+   * Test a Google Custom Search API key
+   */
+  private async testGoogleCustomSearchKey(apiKey: string, cseId: string): Promise<IApiKeyTestResult> {
+    try {
+      const params = new URLSearchParams({
+        key: apiKey,
+        cx: cseId,
+        q: 'test query',
+        num: '1'
+      });
+
+      const url = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          valid: false,
+          message: `API request failed: ${response.status} ${errorText}`,
+          details: { errorMessage: errorText }
+        };
+      }
+
+      const data: IGoogleCustomSearchResponse = await response.json();
+
+      if (data.searchInformation) {
+        return {
+          valid: true,
+          message: 'Google Custom Search API key is valid and working',
+          details: {
+            totalResults: parseInt(data.searchInformation.totalResults || '0'),
+            responseTime: data.searchInformation.searchTime,
+            testKeyword: 'test query'
+          }
+        };
+      }
+
+      return {
+        valid: false,
+        message: 'Invalid response from Google Custom Search API',
+        details: { errorMessage: 'No search information in response' }
+      };
+
+    } catch (error) {
+      const errorMessage = (error as Error).message;
+      logger.error(`❌ Google Custom Search API key test failed: ${errorMessage}`);
+      
+      return {
+        valid: false,
+        message: `API key test failed: ${errorMessage}`,
+        details: { errorMessage }
+      };
+    }
   }
 }

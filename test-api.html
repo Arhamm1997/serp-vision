@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SERP API Tester</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, textarea, button {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        button {
+            background: #007cba;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #005a87;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            white-space: pre-wrap;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .loading {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 SERP API Tester</h1>
+        <p>Test the <code>/api/search/analyze</code> endpoint with proper POST requests.</p>
+        
+        <form id="testForm">
+            <div class="form-group">
+                <label for="keywords">Keywords (one per line):</label>
+                <textarea id="keywords" rows="4" placeholder="digital marketing&#10;SEO services&#10;web development">digital marketing
+SEO services
+web development</textarea>
+            </div>
+            
+            <div class="form-group">
+                <label for="domain">Domain (without http/https):</label>
+                <input type="text" id="domain" placeholder="example.com" value="example.com">
+            </div>
+            
+            <div class="form-group">
+                <label for="country">Country Code:</label>
+                <input type="text" id="country" placeholder="US" value="US" maxlength="2">
+            </div>
+            
+            <div class="form-group">
+                <label for="city">City (optional):</label>
+                <input type="text" id="city" placeholder="New York">
+            </div>
+            
+            <div class="form-group">
+                <label for="apiKey">Your SerpAPI Key (optional):</label>
+                <input type="text" id="apiKey" placeholder="Leave empty to use default key">
+            </div>
+            
+            <button type="submit" id="submitBtn">🚀 Analyze Keywords</button>
+        </form>
+        
+        <div id="result"></div>
+    </div>
+
+    <script>
+        document.getElementById('testForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const submitBtn = document.getElementById('submitBtn');
+            const resultDiv = document.getElementById('result');
+            
+            // Get form data
+            const keywords = document.getElementById('keywords').value
+                .split('\n')
+                .map(k => k.trim())
+                .filter(k => k.length > 0);
+            
+            const domain = document.getElementById('domain').value.trim();
+            const country = document.getElementById('country').value.trim().toUpperCase();
+            const city = document.getElementById('city').value.trim();
+            const apiKey = document.getElementById('apiKey').value.trim();
+            
+            // Validation
+            if (keywords.length === 0) {
+                showResult('Please enter at least one keyword.', 'error');
+                return;
+            }
+            
+            if (!domain) {
+                showResult('Please enter a domain.', 'error');
+                return;
+            }
+            
+            if (!country) {
+                showResult('Please enter a country code.', 'error');
+                return;
+            }
+            
+            // Prepare request data
+            const requestData = {
+                keywords: keywords,
+                domain: domain,
+                country: country
+            };
+            
+            if (city) requestData.city = city;
+            if (apiKey) requestData.apiKey = apiKey;
+            
+            // Show loading state
+            submitBtn.disabled = true;
+            submitBtn.textContent = '⏳ Analyzing...';
+            showResult('Sending request to /api/search/analyze...', 'loading');
+            
+            try {
+                const response = await fetch('http://localhost:5000/api/search/analyze', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json; charset=utf-8'
+                    },
+                    body: JSON.stringify(requestData)
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult('✅ Success!\n\n' + JSON.stringify(data, null, 2), 'success');
+                } else {
+                    showResult('❌ Error: ' + (data.message || 'Unknown error') + '\n\n' + JSON.stringify(data, null, 2), 'error');
+                }
+                
+            } catch (error) {
+                showResult('❌ Network Error: ' + error.message + '\n\nMake sure the backend server is running on http://localhost:5000', 'error');
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = '🚀 Analyze Keywords';
+            }
+        });
+        
+        function showResult(message, type) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.textContent = message;
+            resultDiv.className = 'result ' + type;
+        }
+        
+        // Test server connection on page load
+        window.addEventListener('load', async function() {
+            try {
+                const response = await fetch('http://localhost:5000/health');
+                const data = await response.json();
+                if (data.status === 'healthy') {
+                    showResult('✅ Server is running and healthy!', 'success');
+                }
+            } catch (error) {
+                showResult('❌ Cannot connect to server. Make sure it\'s running on http://localhost:5000', 'error');
+            }
+        });
+    </script>
+</body>
+</html>
